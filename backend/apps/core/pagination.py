@@ -1,0 +1,29 @@
+"""Shared pagination for every list endpoint."""
+
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
+
+
+class StandardResultsSetPagination(PageNumberPagination):
+    """Page-number pagination with a client-controllable page size.
+
+    The response envelope is flattened slightly compared with DRF's default so
+    the Flutter client can bind a list screen without unwrapping nested links.
+    """
+
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        return Response(
+            {
+                "count": self.page.paginator.count,
+                "total_pages": self.page.paginator.num_pages,
+                "current_page": self.page.number,
+                "page_size": self.get_page_size(self.request),
+                "next": self.get_next_link(),
+                "previous": self.get_previous_link(),
+                "results": data,
+            }
+        )

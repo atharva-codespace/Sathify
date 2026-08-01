@@ -1,0 +1,70 @@
+# Render deployment blueprint (free tier).
+#
+# Free plan reality — see docs/free-tier-constraints.md:
+#   * sleeps after 15 minutes idle, ~50 s cold start
+#   * 512 MB RAM: the PaddleOCR/DeepFace stack does NOT fit here
+#   * 750 instance-hours/month account-wide, so keep this to ONE service
+#
+# Secrets are marked sync:false and must be entered in the Render dashboard;
+# they are never committed to the repository.
+
+services:
+  - type: web
+    name: sathify-api
+    runtime: python
+    plan: free
+    region: singapore # closest free region to India
+    branch: main
+    rootDir: backend
+
+    buildCommand: |
+      pip install -r requirements/prod.txt
+      python manage.py collectstatic --noinput
+      python manage.py migrate
+
+    # Single worker, restricted threads: 512 MB does not stretch further.
+    startCommand: gunicorn config.wsgi:application --workers 1 --threads 4 --timeout 120
+
+    healthCheckPath: /health/
+
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.prod
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true # Render generates and stores a strong key
+      - key: DJANGO_DEBUG
+        value: "False"
+
+      # --- Supabase: paste the SESSION POOLER URI (port 6543) ----------------
+      - key: DATABASE_URL
+        sync: false
+
+      # --- Supabase Storage (media must not touch Render's ephemeral disk) ---
+      - key: SUPABASE_STORAGE_BUCKET
+        value: sathify-media
+      - key: SUPABASE_STORAGE_ENDPOINT
+        sync: false
+      - key: SUPABASE_STORAGE_ACCESS_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_SECRET_KEY
+        sync: false
+
+      # --- AI layer: four free tiers, tried in order ------------------------
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: HUGGINGFACE_API_KEY
+        sync: false
+
+      # --- Payments (test mode) ---------------------------------------------
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_TEST_MODE
+        value: "True"

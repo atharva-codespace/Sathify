@@ -1,0 +1,34 @@
+# Computer-vision dependencies for Module 3 (OCR) and Module 6 (face verification).
+#
+# INSTALLED SEPARATELY AND DELIBERATELY. This set pulls in PaddlePaddle,
+# TensorFlow and PyTorch — several GB on disk and well over 512 MB of RSS at
+# runtime. It does NOT fit on Render's free tier (512 MB RAM); see
+# docs/free-tier-constraints.md for the deployment split we use instead.
+#
+#   python -m pip install -r requirements/ml.txt
+#
+# Verified available as cp313 Windows wheels on 2026-07-30.
+
+-r base.txt
+
+# --- Stage 2 preprocessing (OpenCV) -----------------------------------------
+opencv-python-headless==4.12.0.88  # headless: no GUI libs, smaller install
+numpy==2.2.6                       # pinned <2.3 for paddle/TF compatibility
+
+# --- OCR: PaddleOCR primary -------------------------------------------------
+paddlepaddle==3.1.1
+paddleocr==3.1.1
+
+# --- OCR: EasyOCR automatic fallback ----------------------------------------
+easyocr==1.7.2
+# torch is pulled in by easyocr; pinned here so the CPU build is explicit.
+torch==2.7.1
+torchvision==0.22.1
+
+# --- Face verification (Module 6) -------------------------------------------
+deepface==0.0.100
+tf-keras==2.20.1      # DeepFace requires the standalone Keras 2 shim
+tensorflow==2.20.0    # first release with cp313 wheels
+
+# --- PDF input support (OCR Stage 1) ----------------------------------------
+pdf2image==1.17.0     # NOTE: also needs the poppler binary on PATH

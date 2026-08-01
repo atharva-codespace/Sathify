@@ -1,0 +1,7 @@
+from django.apps import AppConfig
+
+
+class SocietiesConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.societies'
+    verbose_name = 'Module 2 - Society & Resident Onboarding'

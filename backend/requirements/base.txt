@@ -1,0 +1,28 @@
+# Sathify backend — core runtime dependencies.
+# Shared by every environment. Keep this file free of anything heavy or
+# platform-specific; ML/CV deps live in ml.txt, deploy-only deps in prod.txt.
+
+Django==5.2.16                       # LTS release — supported into 2028
+djangorestframework==3.17.1          # JSON API layer (no server-rendered templates)
+djangorestframework-simplejwt==5.5.1 # JWT access/refresh tokens + blacklist
+django-environ==0.12.0               # 12-factor .env loading
+dj-database-url==3.0.1               # parses Supabase DATABASE_URL into Django config
+psycopg[binary]==3.2.9               # PostgreSQL driver (Supabase)
+django-cors-headers==4.7.0           # Flutter app is a cross-origin client
+django-filter==25.1                  # search/filter backends for worker discovery
+drf-spectacular==0.28.0              # OpenAPI 3 schema -> Flutter client contract
+Pillow==11.3.0                       # image handling (worker photos, Aadhaar uploads)
+qrcode[pil]==8.2                     # Module 7: worker gate-pass QR generation
+reportlab==4.2.5                     # Module 8.3: monthly salary summary PDFs
+google-auth==2.36.0                  # Module 10.1: FCM HTTP v1 service-account auth
+requests==2.32.4                     # Razorpay REST calls + AI layer (Modules 8, 12)
+
+# NOTE ON RAZORPAY (Module 8)
+# The official `razorpay` SDK is deliberately NOT used. Version 1.4.2 imports
+# `pkg_resources` at module load, which setuptools 81+ removed and which does
+# not exist on this project's Python 3.13 — the SDK cannot be imported at all
+# here. Rather than pin an old setuptools to keep a convenience wrapper alive,
+# Module 8 talks to Razorpay's REST API with `requests` and verifies webhook
+# signatures with stdlib `hmac`. That is a smaller surface, it removes a
+# dependency, and it makes the security-critical path testable without the
+# network. See apps/payments/gateway.py.

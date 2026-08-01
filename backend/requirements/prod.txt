@@ -1,0 +1,9 @@
+# Deployment dependencies (Render free tier).
+#   python -m pip install -r requirements/prod.txt
+
+-r base.txt
+
+gunicorn==23.0.0        # WSGI server on Render
+whitenoise==6.9.0       # static file serving without a CDN
+django-storages==1.14.6 # S3-compatible backend -> Supabase Storage
+boto3==1.40.11          # required by django-storages S3 backend

@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Sathify — repository-wide ignores
+# ---------------------------------------------------------------------------
+
+# --- Secrets (NEVER commit; commit only the .env.example templates) ---------
+.env
+.env.*
+!.env.example
+*firebase-adminsdk*.json
+*service-account*.json
+
+# Firebase client config (Module 10.1). Ties the build to one Firebase project
+# and carries per-project identifiers; each developer drops in their own. The
+# app is built to run without it — see mobile/lib/features/notifications/data/
+# push_service.dart — so a fresh clone still starts, just with push off.
+mobile/android/app/google-services.json
+mobile/ios/Runner/GoogleService-Info.plist
+
+# --- Python / Django --------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+db.sqlite3
+db.sqlite3-journal
+
+# Uploaded media + collected static are generated, not source
+backend/media/
+backend/staticfiles/
+
+# Model weights downloaded at runtime by PaddleOCR / EasyOCR / DeepFace
+.paddleocr/
+.EasyOCR/
+.deepface/
+
+# --- Flutter / Dart ---------------------------------------------------------
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/build/
+mobile/.pub-cache/
+mobile/.pub/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+*.jks
+*.keystore
+mobile/coverage/
+
+# --- Editors / OS -----------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
