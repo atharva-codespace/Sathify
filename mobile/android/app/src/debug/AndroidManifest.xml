@@ -4,4 +4,13 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Local development talks to Django over plain http:// on the LAN. Since
+         targetSdk 28 Android's default network security policy blocks cleartext
+         outright, and the resulting socket failure reaches ApiClient._translate
+         as DioExceptionType.connectionError — which maps to ApiException.offline
+         and surfaces as "No internet connection", regardless of the device's
+         actual connectivity. Declared in the DEBUG manifest only: release builds
+         hit Render over https and must keep cleartext blocked. -->
+    <application android:usesCleartextTraffic="true"/>
 </manifest>

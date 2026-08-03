@@ -206,7 +206,10 @@ class ApiClient {
   /// Runs [request], translating every failure into an [ApiException].
   ///
   /// Checking connectivity first means callers get a clean `offline` code they
-  /// can queue on, rather than an opaque socket error.
+  /// can queue on, rather than an opaque socket error. A failure that gets past
+  /// this check and dies on the wire anyway becomes `unreachable` instead — see
+  /// [_translate]. Callers that only care whether the request landed should test
+  /// `isConnectionFailure`, which covers both.
   Future<dynamic> _send(Future<Response<dynamic>> Function() request) async {
     final connections = await _connectivity.checkConnectivity();
     if (connections.every((c) => c == ConnectivityResult.none)) {
@@ -228,7 +231,12 @@ class ApiClient {
       case DioExceptionType.sendTimeout:
         return const ApiException.timeout();
       case DioExceptionType.connectionError:
-        return const ApiException.offline();
+        // The pre-flight check in _send already cleared the device's own
+        // connectivity, so reaching here means the network is up and the
+        // *server* did not answer — a different problem, and a different
+        // message. Both still satisfy isConnectionFailure, so queueing and
+        // cache fallbacks behave exactly as before.
+        return const ApiException.unreachable();
       default:
         final data = e.response?.data;
         if (data is Map<String, dynamic>) {

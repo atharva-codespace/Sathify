@@ -100,7 +100,7 @@ class AttendanceRepository {
       ) as Map<String, dynamic>;
       return ScanResult.fromJson(response);
     } on ApiException catch (error) {
-      if (!error.isOffline) rethrow;
+      if (!error.isConnectionFailure) rethrow;
       final entry = await _queue.findByCode(day ?? DateTime.now(), code);
       return entry?.toScanResult();
     }
