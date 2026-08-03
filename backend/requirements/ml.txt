@@ -9,11 +9,9 @@
 #
 # Verified available as cp313 Windows wheels on 2026-07-30.
 
--r base.txt
-
-# --- Stage 2 preprocessing (OpenCV) -----------------------------------------
-opencv-python-headless==4.12.0.88  # headless: no GUI libs, smaller install
-numpy==2.2.6                       # pinned <2.3 for paddle/TF compatibility
+# Brings in base.txt plus OpenCV and NumPy. Those two are pinned in cv.txt
+# rather than here so CI can install the cheap half of the CV stack on its own.
+-r cv.txt
 
 # --- OCR: PaddleOCR primary -------------------------------------------------
 paddlepaddle==3.1.1

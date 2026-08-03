@@ -28,6 +28,7 @@ env/
 .coverage
 htmlcov/
 coverage.xml
+cov.json
 db.sqlite3
 db.sqlite3-journal
 
@@ -63,3 +64,9 @@ mobile/coverage/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Per-developer AI-assistant tool permissions. Machine-local decisions about
+# which commands may run without a prompt — no value to anyone else, and it
+# churns constantly. The shared .claude/settings.json, if one is ever added,
+# is deliberately NOT ignored.
+.claude/settings.local.json

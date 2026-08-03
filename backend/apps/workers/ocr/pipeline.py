@@ -18,6 +18,15 @@ Each stage is independently importable and testable; this module only sequences
 them. Stages 1, 2 and 5-8 need nothing beyond OpenCV and the standard library,
 so the majority of the pipeline is testable without the heavy OCR engines
 installed.
+
+Stages 1 and 2 are imported inside :func:`run_ocr_pipeline` rather than at
+module scope, because they are the only two that need OpenCV — and OpenCV ships
+in requirements/cv.txt (or ml.txt), not base.txt. Django reaches this module at
+startup
+(apps.workers.admin -> services -> ocr), so a module-scope OpenCV import would
+make every management command fail on a base install. Deferring it means a
+missing OpenCV surfaces as ``OcrPipelineError`` at the point of use, which is
+already the manual-entry fallback path every caller handles (SRS 2.5).
 """
 
 from __future__ import annotations
@@ -26,16 +35,18 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 
 from .crosscheck import CrossCheckResult, MatchStatus, cross_check_with_form
 from .engines import OcrEngineError, recognise
 from .extraction import ExtractedFields, calculate_age, extract_fields
-from .image_input import ImageInputError, load_image
 from .output import OcrResult
-from .preprocessing import PreprocessingResult, preprocess_image
 from .verhoeff import mask_aadhaar
+
+if TYPE_CHECKING:
+    from .preprocessing import PreprocessingResult
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +139,26 @@ def run_ocr_pipeline(
     ``form_data`` supplies what the worker typed at registration, enabling
     Stage 8. Omitting it skips only that stage.
 
-    Raises ``OcrPipelineError`` when the image cannot be read or no OCR engine
-    is available — the caller then falls back to manual entry, as SRS 2.5
-    requires.
+    Raises ``OcrPipelineError`` when the image cannot be read, when OpenCV is
+    not installed, or when no OCR engine is available — in every case the caller
+    falls back to manual entry, as SRS 2.5 requires. All three are ordinary
+    states on a machine that has not installed the CV stack, not faults.
     """
     started = time.perf_counter()
     ocr_settings = getattr(settings, "OCR_SETTINGS", {})
     languages = languages or ocr_settings.get("LANGUAGES", ["en"])
+
+    # Stages 1 and 2 are the OpenCV-backed ones — see the module docstring for
+    # why they are reached here and not at import time.
+    try:
+        from .image_input import ImageInputError, load_image
+        from .preprocessing import PreprocessingResult, preprocess_image
+    except ImportError as exc:
+        raise OcrPipelineError(
+            "OpenCV is not installed, so documents cannot be scanned here "
+            "(`pip install -r requirements/cv.txt`, or ml.txt for the OCR "
+            "engines too). Enter the details manually."
+        ) from exc
 
     result = PipelineResult()
 

@@ -1,0 +1,85 @@
+# Sathify code owners.
+#
+# GitHub reads this file to auto-request a review from whoever owns the files a
+# pull request touches. On a project whose whole structure is "one module per
+# person" (see CONTRIBUTING.md), that turns the ownership convention from a
+# thing written in a README into a thing the tooling enforces.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE IS A TEMPLATE AND IS CURRENTLY INERT.
+#
+# Every rule below is commented out because the team's GitHub usernames are not
+# known yet. To switch it on: replace @person-a .. @person-d with real
+# usernames, uncomment the lines for the modules each person owns, and delete
+# the rest. Nothing else in the repository depends on it, so a partly-filled
+# file is fine — unmatched paths simply get no automatic reviewer.
+#
+# CODEOWNERS only *requests* reviews. It becomes a requirement only if you also
+# turn on "Require review from Code Owners" in branch protection; see the
+# branch-protection section of CONTRIBUTING.md.
+# ---------------------------------------------------------------------------
+
+# --- Shared code: everyone reviews ------------------------------------------
+# These are the files four people edit at once, so they are the ones worth all
+# four pairs of eyes. Keep this block enabled even if the per-module rules
+# below are not.
+#
+# /backend/apps/core/               @person-a @person-b @person-c @person-d
+# /backend/config/                  @person-a @person-b @person-c @person-d
+# /backend/requirements/            @person-a @person-b @person-c @person-d
+# /mobile/lib/core/                 @person-a @person-b @person-c @person-d
+# /mobile/lib/shared/               @person-a @person-b @person-c @person-d
+# /mobile/pubspec.yaml              @person-a @person-b @person-c @person-d
+# /.github/                         @person-a @person-b @person-c @person-d
+
+# --- Module owners ----------------------------------------------------------
+# Each Django app is paired with its Flutter feature folder, because a module
+# is both halves. Assign the pairs, not the individual folders.
+#
+# Module 1  — Identity & Access
+# /backend/apps/accounts/           @person-a
+# /mobile/lib/features/auth/        @person-a
+#
+# Module 2  — Society & Resident Onboarding
+# /backend/apps/societies/          @person-a
+# /mobile/lib/features/societies/   @person-a
+#
+# Module 3  — Worker Onboarding & KYC
+# /backend/apps/workers/            @person-b
+# /mobile/lib/features/workers/     @person-b
+#
+# Module 4  — Discovery & Hiring
+# /backend/apps/hiring/             @person-b
+# /mobile/lib/features/hiring/      @person-b
+#
+# Module 5  — One-Day Service Booking
+# /backend/apps/bookings/           @person-c
+# /mobile/lib/features/bookings/    @person-c
+#
+# Module 6  — Scheduling & Task Management
+# /backend/apps/scheduling/         @person-c
+# /mobile/lib/features/scheduling/  @person-c
+#
+# Module 7  — Attendance & Gate Verification
+# /backend/apps/attendance/         @person-d
+# /mobile/lib/features/attendance/  @person-d
+#
+# Module 8  — Payments & Payouts
+# /backend/apps/payments/           @person-d
+# /mobile/lib/features/payments/    @person-d
+#
+# Module 9  — Ratings & Trust Score
+# /backend/apps/ratings/            @person-a
+# /mobile/lib/features/ratings/     @person-a
+#
+# Module 10 — Notifications
+# /backend/apps/notifications/      @person-b
+# /mobile/lib/features/notifications/ @person-b
+#
+# Module 11 — Admin, Reporting & Complaints
+# /backend/apps/administration/     @person-c
+# /mobile/lib/features/administration/ @person-c
+#
+# Module 12 — AI Layer
+# /backend/apps/ai_services/        @person-d
+# /mobile/lib/features/ai/          @person-d

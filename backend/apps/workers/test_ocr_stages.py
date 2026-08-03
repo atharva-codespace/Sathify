@@ -3,7 +3,13 @@ Module 3 — tests for the 8-stage OCR pipeline.
 
 Stages 1, 2 and 5-8 need only OpenCV and the standard library, so they are
 tested here in full, with no OCR engine installed. Stages 3 and 4 (the engines
-themselves) are covered by test_ocr_engines.py, which is marked ``ml``.
+themselves) need PaddleOCR or EasyOCR and are not covered here.
+
+OpenCV itself is not a base dependency — it arrives with requirements/ml.txt
+(or the OpenCV-only requirements/cv.txt that CI installs). This module is
+therefore skipped wholesale rather than erroring during collection on a base
+install: an import at module scope would take the entire test session down with
+it, which is not what ``pytest -m "not ml"`` is supposed to mean.
 
 No real Aadhaar number appears anywhere in this file. Valid test numbers are
 generated with ``generate_check_digit`` so the fixtures are synthetic but
@@ -14,11 +20,12 @@ from __future__ import annotations
 
 from datetime import date
 
-import cv2
-import numpy as np
 import pytest
 
-from apps.workers.ocr.crosscheck import (
+cv2 = pytest.importorskip("cv2", reason="needs requirements/cv.txt (OpenCV)")
+np = pytest.importorskip("numpy", reason="needs requirements/cv.txt (NumPy)")
+
+from apps.workers.ocr.crosscheck import (  # noqa: E402 — must follow importorskip
     MatchStatus,
     compare_aadhaar,
     compare_dob,

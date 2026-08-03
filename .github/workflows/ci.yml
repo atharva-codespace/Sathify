@@ -1,0 +1,105 @@
+# Sathify CI — the smallest thing that stops `main` from breaking.
+#
+# Scope is deliberate. With four people owning twelve modules, the failures
+# that actually cost the team time are: someone pushes code that does not
+# import, someone changes a model and forgets the migration, and someone's
+# branch breaks a module they do not own. All three are caught below. Coverage
+# gates, release automation and matrix builds are not, because nobody here is
+# going to maintain them.
+#
+# Cost: two jobs of a few minutes each. GitHub Actions is free for public
+# repositories and gives private ones 2,000 minutes/month, so this fits the
+# same zero-budget rule as everything else (docs/free-tier-constraints.md).
+#
+# The heavy CV stack (requirements/ml.txt — PaddlePaddle, PyTorch, TensorFlow,
+# several GB) is NOT installed. requirements/cv.txt is: it is ~60 MB and it
+# unlocks OCR Stages 1, 2 and 5-8, which is most of Module 3's test file.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same PR cancels the first run rather than queueing
+# behind it — on a shared free-tier minute budget, stale runs are pure waste.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Django)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches PYTHON_VERSION in render.yaml. Keep them in step: a version
+          # that passes here and fails on deploy is the worst kind of green.
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements/*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/dev.txt -r requirements/cv.txt
+
+      - name: Create .env from the template
+        # Not just setup: this is the test. The README promises a fresh clone
+        # runs with an unedited .env (SQLite, every integration degraded), and
+        # this is what keeps that promise honest instead of aspirational.
+        run: cp .env.example .env
+
+      - name: Django system checks
+        run: python manage.py check
+
+      - name: Migrations are in sync with the models
+        # The four-person failure this exists for: someone edits models.py,
+        # runs the server (which does not care), and pushes without the
+        # migration. Everyone else's next `migrate` then does nothing and their
+        # database quietly diverges from the code.
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Tests
+        run: python -m pytest -m "not ml" -q
+
+  mobile:
+    name: Mobile (Flutter)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create .env from the template
+        # Must come before pub get / analyze / test: pubspec.yaml declares
+        # `.env` as a bundled asset, and Flutter refuses to build an asset
+        # bundle when a declared asset is missing.
+        run: cp .env.example .env
+
+      - name: Install packages
+        run: flutter pub get
+
+      - name: Analyze
+        # --no-fatal-infos: the analyzer reports deprecations from whatever
+        # Flutter stable currently is, and an SDK release should not turn every
+        # open pull request red. Warnings and errors still fail the job.
+        run: flutter analyze --no-fatal-infos
+
+      - name: Tests
+        run: flutter test
