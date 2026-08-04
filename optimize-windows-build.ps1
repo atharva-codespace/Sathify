@@ -116,9 +116,9 @@ try {
     Write-Host '      Defender exclusions updated successfully.' -ForegroundColor Green
 }
 catch {
-Write-Host '      Windows Defender is not the active scanner on this machine.' -ForegroundColor DarkGray
-Write-Host '      Add-MpPreference does nothing here - see step 3.' -ForegroundColor DarkGray
-Write-Host '      Defender service is not active (McAfee/Third-party AV active). Skipping.' -ForegroundColor DarkGray
+    Write-Host '      Windows Defender is not the active scanner on this machine' -ForegroundColor DarkGray
+    Write-Host '      (McAfee or another third-party AV is handling real-time scanning).' -ForegroundColor DarkGray
+    Write-Host '      Add-MpPreference does nothing here - see step 3.' -ForegroundColor DarkGray
 }
 
 # -----------------------------------------------------------------------------
@@ -166,21 +166,19 @@ if ($defenderActive) {
 }
 Write-Host ''
 Write-Host '  Folders to exclude:' -ForegroundColor Cyan
-foreach ($p in $paths) { Write-Host "      $p" }
-Write-Host ''
-Write-Host '  This is expected to be the biggest single build-time improvement.' -ForegroundColor Cyan
-Write-Host ''
-Write-Host ''
-Write-Host '[3/3] Folder Paths Found On Your PC:' -ForegroundColor Yellow
-Write-Host ''
+# Marked by whether they actually exist: a folder that is not there cannot be
+# added in an AV exclusion dialog, and you should not go hunting for it. A
+# MISSING line usually means that tool lives somewhere this script did not
+# think to look - see the header note.
 foreach ($p in $paths) {
     if (Test-Path $p) {
-        Write-Host "  [EXISTS]  $p" -ForegroundColor Cyan
+        Write-Host "      [EXISTS]   $p" -ForegroundColor Cyan
+    } else {
+        Write-Host "      [MISSING]  $p  (skip it)" -ForegroundColor DarkGray
     }
 }
 Write-Host ''
-Write-Host 'If using McAfee, open McAfee Settings > Real-Time Scanning > Excluded Files'
-Write-Host 'and manually add the [EXISTS] folders listed above.'
+Write-Host '  This is expected to be the biggest single build-time improvement.' -ForegroundColor Cyan
 Write-Host ''
-Write-Host '=== Done! Close and reopen your terminal. ===' -ForegroundColor Cyan
+Write-Host '=== Done. Close and reopen your terminal. ===' -ForegroundColor Cyan
 Write-Host ''
