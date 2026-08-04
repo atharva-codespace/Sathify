@@ -1,0 +1,20 @@
+# The OpenCV half of the computer-vision stack, split out from ml.txt.
+#
+#   python -m pip install -r requirements/cv.txt
+#
+# WHY THIS IS SEPARATE FROM ml.txt
+# OCR Stages 1, 2 and 5-8 (image input, preprocessing, and everything after
+# recognition) need only OpenCV and NumPy — about 60 MB. Stages 3 and 4 need
+# PaddlePaddle/PyTorch/TensorFlow, which is several GB. Splitting the two lets
+# CI exercise most of the pipeline for the price of a small wheel, instead of
+# skipping all of Module 3 because the heavy half will not fit in a free runner.
+#
+# You do NOT need this for day-to-day work on any other module: the pipeline
+# reports "OpenCV is not installed" through the same manual-entry fallback it
+# uses when no OCR engine is present. Install it when you are working on
+# Module 3 or 7, or install ml.txt, which includes this file.
+
+-r base.txt
+
+opencv-python-headless==4.12.0.88  # headless: no GUI libs, smaller install
+numpy==2.2.6                       # pinned <2.3 for paddle/TF compatibility

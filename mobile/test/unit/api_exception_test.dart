@@ -60,6 +60,43 @@ void main() {
       expect(exception.code, 'offline');
     });
 
+    test('offline and unreachable are told apart for the user', () {
+      // The two have different remedies, so they must not share wording:
+      // checking the phone's connection does nothing when the server is down.
+      const offline = ApiException.offline();
+      const unreachable = ApiException.unreachable();
+
+      expect(unreachable.code, 'unreachable');
+      expect(unreachable.isUnreachable, isTrue);
+      expect(unreachable.isOffline, isFalse);
+      expect(offline.isUnreachable, isFalse);
+      expect(offline.message, isNot(unreachable.message));
+    });
+
+    test('both connection failures still route to the local queue', () {
+      // The guard-facing behaviour must not change with the message split:
+      // attendance falls back to its cache on isConnectionFailure, so a server
+      // that is merely down has to queue exactly like a dead radio does.
+      expect(const ApiException.offline().isConnectionFailure, isTrue);
+      expect(const ApiException.unreachable().isConnectionFailure, isTrue);
+      expect(const ApiException.timeout().isConnectionFailure, isFalse);
+      expect(
+        const ApiException(code: 'validation_error', message: 'Bad.')
+            .isConnectionFailure,
+        isFalse,
+      );
+    });
+
+    test('no connection message claims the action was saved', () {
+      // Regression guard for a login screen that said "your action has been
+      // queued" while saving nothing. Only the caller knows if it queued.
+      expect(const ApiException.offline().message, isNot(contains('queued')));
+      expect(
+        const ApiException.unreachable().message,
+        isNot(contains('queued')),
+      );
+    });
+
     test('auth and permission failures are distinguishable', () {
       const authFailure = ApiException(
         code: 'authentication_failed',

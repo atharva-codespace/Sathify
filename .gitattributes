@@ -1,0 +1,46 @@
+# Line endings, settled once so four people on different operating systems do
+# not fight about them.
+#
+# Without this file, each developer's local `core.autocrlf` decides what lands
+# in a commit. Get two different answers across the team and a one-line change
+# arrives as a diff touching every line in the file, which buries the real
+# change in review and turns trivial merges into whole-file conflicts.
+#
+# Everything currently committed is already LF, so adding this changes nothing
+# today. It just stops the problem starting.
+
+# Normalise every text file to LF in the repository. Git still checks out
+# whatever the platform wants; this governs what is stored.
+* text=auto eol=lf
+
+# --- Files that must keep CRLF on disk ---------------------------------------
+# Windows batch files are parsed line by line by cmd.exe and misbehave with
+# LF endings. The Gradle wrapper's .bat is the one that matters here.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# --- Files that must keep LF on disk -----------------------------------------
+# Shell scripts, including the Gradle wrapper, are run by bash on macOS/Linux
+# and by Git Bash on Windows; a CR at the end of the shebang breaks them.
+*.sh      text eol=lf
+gradlew   text eol=lf
+
+# --- Binary: never touch, never diff as text ---------------------------------
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.jar  binary
+*.keystore binary
+*.jks  binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
+
+# --- Diff hints ---------------------------------------------------------------
+# Lock files are generated; collapsing them keeps `git diff` readable when a
+# dependency bump rewrites hundreds of lines.
+mobile/pubspec.lock linguist-generated=true

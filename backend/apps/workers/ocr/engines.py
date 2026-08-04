@@ -14,16 +14,23 @@ is wanted — previewing what the engine found before paying for recognition.
 Engines are imported lazily inside the methods. Importing paddle or torch at
 module import time would add seconds to every Django start, including the
 majority of requests that never touch OCR.
+
+numpy is imported under TYPE_CHECKING for the same reason, one step further:
+it appears here only in annotations, and ``from __future__ import annotations``
+leaves those unevaluated. It ships in requirements/ml.txt, so importing it for
+real would make this module — and therefore Django's whole app registry, which
+reaches it via apps.workers.admin — unimportable on a base install.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
-
-import numpy as np
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .output import OcrResult, build_ocr_result
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
