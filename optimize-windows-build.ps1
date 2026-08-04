@@ -1,5 +1,5 @@
 # =============================================================================
-# Sathify - Windows build environment optimizer
+# Sathify - Windows build environment optimizer (Dynamic Paths)
 # =============================================================================
 # OPTIONAL, and Windows-only. Run it once, as Administrator, if your Flutter
 # Android builds are painfully slow. Nothing in the project depends on it.
@@ -30,16 +30,17 @@
 # script telling you your tooling is somewhere it did not think to look, and
 # you should add it by hand in your antivirus UI.
 # =============================================================================
-
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = 'Continue'
 
 Write-Host ''
-Write-Host '=== Sathify Windows build optimizer ===' -ForegroundColor Cyan
+Write-Host '=== Windows Build Optimizer (Auto-Detecting Paths) ===' -ForegroundColor Cyan
 Write-Host ''
 
-# --- Work out where everything actually lives on THIS machine ----------------
+# --- Environment Variables (Auto-detect user profile & appdata) --------------
+$userProfile  = $env:USERPROFILE
+$localAppData = $env:LOCALAPPDATA
 
 # The repository is wherever this script is.
 $repoRoot = $PSScriptRoot
@@ -56,15 +57,15 @@ if ($flutterCmd) {
 # install location Android Studio uses.
 $androidSdk = $env:ANDROID_HOME
 if (-not $androidSdk) { $androidSdk = $env:ANDROID_SDK_ROOT }
-if (-not $androidSdk) { $androidSdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
+if (-not $androidSdk) { $androidSdk = Join-Path $localAppData 'Android\Sdk' }
 
 # Gradle honours GRADLE_USER_HOME, and defaults to ~\.gradle.
 $gradleHome = $env:GRADLE_USER_HOME
-if (-not $gradleHome) { $gradleHome = Join-Path $env:USERPROFILE '.gradle' }
+if (-not $gradleHome) { $gradleHome = Join-Path $userProfile '.gradle' }
 
 # pub honours PUB_CACHE, and defaults to %LOCALAPPDATA%\Pub\Cache on Windows.
 $pubCache = $env:PUB_CACHE
-if (-not $pubCache) { $pubCache = Join-Path $env:LOCALAPPDATA 'Pub\Cache' }
+if (-not $pubCache) { $pubCache = Join-Path $localAppData 'Pub\Cache' }
 
 # The JDK the Android build uses. JAVA_HOME if set, otherwise resolve `java`.
 # See README: this project's Gradle/AGP/Kotlin versions need JDK 21.
@@ -86,13 +87,13 @@ Write-Host "      pub cache   $pubCache"
 Write-Host "      jdk         $(if ($javaHome) { $javaHome } else { 'NOT FOUND (is java on PATH?)' })"
 Write-Host ''
 
-# --- Processes that do the hammering ----------------------------------------
+# --- Processes that build/compile --------------------------------------------
 $procs = @('java.exe', 'javaw.exe', 'dart.exe', 'flutter.bat', 'gradle.exe',
            'gradlew.bat', 'adb.exe', 'kotlin-daemon.exe', 'aapt2.exe',
            'python.exe')
 
 # -----------------------------------------------------------------------------
-# 1. Windows Defender exclusions
+# 1. Windows Defender Exclusions
 # -----------------------------------------------------------------------------
 Write-Host '[1/3] Windows Defender exclusions...' -ForegroundColor Yellow
 $defenderActive = $false
@@ -103,43 +104,42 @@ try {
     foreach ($p in $paths) {
         if (Test-Path $p) {
             Add-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue
-            Write-Host "      + path    $p" -ForegroundColor Green
+            Write-Host "      + Excluded path:    $p" -ForegroundColor Green
         } else {
-            Write-Host "      ! missing  $p (skipped)" -ForegroundColor DarkGray
+            Write-Host "      ! Folder missing:   $p (skipped)" -ForegroundColor DarkGray
         }
     }
     foreach ($x in $procs) {
         Add-MpPreference -ExclusionProcess $x -ErrorAction SilentlyContinue
-        Write-Host "      + process $x" -ForegroundColor Green
+        Write-Host "      + Excluded process: $x" -ForegroundColor Green
     }
-    Write-Host '      Defender exclusions applied.' -ForegroundColor Green
+    Write-Host '      Defender exclusions updated successfully.' -ForegroundColor Green
 }
 catch {
-    Write-Host '      Windows Defender is not the active scanner on this machine.' -ForegroundColor DarkGray
-    Write-Host '      Add-MpPreference does nothing here - see step 3.' -ForegroundColor DarkGray
+Write-Host '      Windows Defender is not the active scanner on this machine.' -ForegroundColor DarkGray
+Write-Host '      Add-MpPreference does nothing here - see step 3.' -ForegroundColor DarkGray
+Write-Host '      Defender service is not active (McAfee/Third-party AV active). Skipping.' -ForegroundColor DarkGray
 }
 
 # -----------------------------------------------------------------------------
-# 2. Enable Windows long path support
+# 2. Enable Windows Long Path Support
 # -----------------------------------------------------------------------------
 Write-Host ''
-Write-Host '[2/3] Enabling long path support (MAX_PATH > 260)...' -ForegroundColor Yellow
+Write-Host '[2/3] Enabling Long Path Support (MAX_PATH > 260)...' -ForegroundColor Yellow
 try {
     $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
     $before = (Get-ItemProperty $key -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled
     Set-ItemProperty -Path $key -Name LongPathsEnabled -Value 1 -Type DWord -ErrorAction Stop
     $after = (Get-ItemProperty $key -Name LongPathsEnabled).LongPathsEnabled
     Write-Host "      LongPathsEnabled: $before -> $after" -ForegroundColor Green
-    Write-Host '      (takes effect for new processes; reboot to be thorough)' -ForegroundColor DarkGray
 }
 catch {
     Write-Host "      FAILED: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-# Git also needs telling, independently of Windows.
 try {
     git config --system core.longpaths true 2>$null
-    Write-Host '      git core.longpaths = true' -ForegroundColor Green
+    Write-Host '      git core.longpaths set to true.' -ForegroundColor Green
 } catch { }
 
 # -----------------------------------------------------------------------------
@@ -170,5 +170,17 @@ foreach ($p in $paths) { Write-Host "      $p" }
 Write-Host ''
 Write-Host '  This is expected to be the biggest single build-time improvement.' -ForegroundColor Cyan
 Write-Host ''
-Write-Host '=== Done. Close and reopen your terminal. ===' -ForegroundColor Cyan
+Write-Host ''
+Write-Host '[3/3] Folder Paths Found On Your PC:' -ForegroundColor Yellow
+Write-Host ''
+foreach ($p in $paths) {
+    if (Test-Path $p) {
+        Write-Host "  [EXISTS]  $p" -ForegroundColor Cyan
+    }
+}
+Write-Host ''
+Write-Host 'If using McAfee, open McAfee Settings > Real-Time Scanning > Excluded Files'
+Write-Host 'and manually add the [EXISTS] folders listed above.'
+Write-Host ''
+Write-Host '=== Done! Close and reopen your terminal. ===' -ForegroundColor Cyan
 Write-Host ''
