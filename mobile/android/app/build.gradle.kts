@@ -1,10 +1,21 @@
 plugins {
     id("com.android.application")
-    // Must come after com.android.application: it hooks the Android variants to
-    // generate google-services resources for each one.
-    id("com.google.gms.google-services")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Applied here rather than in the plugins block above so that push notifications
+// stay genuinely optional, as the README promises. The plugin hard-fails the
+// build with "File google-services.json is missing" whenever it is applied
+// without that file, and the file is gitignored — so an unconditional apply
+// breaks the build for every teammate who has not set up their own Firebase
+// project. Still applied after com.android.application, which it requires: it
+// hooks the Android variants to generate google-services resources for each one.
+//
+// The version stays declared (with `apply false`) in settings.gradle.kts; only
+// the application is conditional.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 android {

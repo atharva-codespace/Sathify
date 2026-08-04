@@ -147,6 +147,34 @@ Demo logins, all with password `Sathify@123`:
 The step-by-step equivalents are below, for when something goes wrong or you
 only want one half of the stack.
 
+### Everyone is on one shared database
+
+The API is deployed at **<https://sathify-api.onrender.com/api/v1>**, backed by
+a shared Supabase Postgres database, and `mobile/.env.example` already points at
+it. So for app work you do **not** need terminal 1 above at all:
+
+```bash
+git clone <this-repo> && cd sathify/mobile
+cp .env.example .env
+flutter run
+```
+
+Every teammate and every phone then sees the same accounts and the same data,
+on any network, with nobody's laptop running and **no database credentials**.
+Log in with any demo account from the table above.
+
+You still want a local backend when you are changing backend code. Run it as in
+terminal 1 and point the app at it for that run only, without editing any file:
+
+```bash
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000/api/v1
+```
+
+Running the Django server locally against the *shared* database additionally
+needs `DATABASE_URL` in `backend/.env` — that value is a secret, is gitignored,
+and comes from a teammate privately, never from the repo. Setup, credential
+handling and free-tier caveats: **[docs/cloud-database.md](docs/cloud-database.md)**.
+
 ---
 
 ## Getting started — backend (step by step)
@@ -289,8 +317,11 @@ when you actually need alerts on a device.
    from `android/app/build.gradle.kts` (`com.sathify.app`).
 2. Drop `google-services.json` into `mobile/android/app/`. It is gitignored, so
    each developer uses their own project.
-3. Add the Google services Gradle plugin, as `firebase_core`'s README describes
-   for your Gradle version.
+3. Nothing to add on the Gradle side — the Google services plugin is already
+   declared in `android/settings.gradle.kts`, and `android/app/build.gradle.kts`
+   applies it automatically as soon as the file from step 2 is present. Do not
+   move that apply back into the `plugins {}` block: applied unconditionally, it
+   fails the build for everyone who has not done step 2.
 4. On the server, point `FCM_SETTINGS` at the same project's service-account
    JSON and set `FCM_ENABLED=true` (see `backend/.env.example`).
 
@@ -308,10 +339,13 @@ registers a token that nothing ever pushes to.
 | The app loads nothing, every request times out | `API_BASE_URL` is pointing somewhere the device cannot reach. Emulator → `10.0.2.2`; physical device → your laptop's LAN IP; and the backend must be running. |
 | "No internet connection" on a physical phone that is online | The server is bound to loopback. Use `runserver 0.0.0.0:8000`, and check the laptop firewall — see "Running on a physical phone". |
 | Gradle fails with a Java/AGP version error | Wrong JDK. This project needs **21** — see Prerequisites. `flutter doctor -v` reports the one Flutter is using. |
+| `:app:processDebugGoogleServices` fails with `File google-services.json is missing` | You are on an older checkout. Firebase is optional, and `android/app/build.gradle.kts` now applies the Google services plugin only when that file exists — pull `main`. Not having the file is the expected state: push is simply off and the in-app notification centre carries everything. Add it only if you want push, per "Push notifications (optional)". |
 | `flutter test` fails in `test/widget_test.dart` | Someone ran `flutter create` in `mobile/`. Delete `mobile/test/widget_test.dart`, `mobile/README.md`, and `mobile/android/app/src/main/kotlin/com/sathify/sathify/`. |
 | First request after a break takes ~50 s | Render's free instance was asleep. Expected — see [docs/free-tier-constraints.md](docs/free-tier-constraints.md) §2. |
 | Android builds take tens of minutes on Windows | Antivirus scanning Gradle's file churn. Run `optimize-windows-build.ps1` as Administrator. |
 | Superuser logs in and sees an empty app | It has no society. Run `python manage.py seed_demo`, which adopts existing superusers into the demo society. |
+| A login that works on one device is "incorrect" on another | The two devices are talking to different databases. Each developer's default SQLite file is separate, so accounts do not carry across. Put everyone on one database — see [docs/cloud-database.md](docs/cloud-database.md). Also check the number is typed bare (`9800000003`), since `+91…` is stored as a *different* account. |
+| `connection to server ... failed` / `could not translate host name ...pooler.supabase.com` | Supabase pauses a free project after 7 days idle. Open the Supabase dashboard and hit **Restore**. If it persists, confirm `DATABASE_URL` uses the pooler port `6543`. |
 
 ---
 
