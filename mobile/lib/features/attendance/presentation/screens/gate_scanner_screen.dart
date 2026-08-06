@@ -3,12 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../../../core/config/app_config.dart';
 import '../../../../core/errors/api_exception.dart';
 import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../notifications/presentation/widgets/notification_bell.dart';
 import '../../data/models/attendance_models.dart';
 import '../providers/attendance_provider.dart';
+import 'face_check_sheet.dart';
 
 /// Module 7.2 — the guard's scanner.
 ///
@@ -66,12 +68,26 @@ class _GateScannerScreenState extends ConsumerState<GateScannerScreen> {
         // device — say so rather than guessing.
         await _showUnknown();
       } else {
-        await showModalBottomSheet<void>(
+        final outcome = await showModalBottomSheet<_DecisionOutcome>(
           context: context,
           isScrollControlled: true,
           isDismissible: false,
           builder: (_) => _DecisionSheet(scan: result),
         );
+
+        // Driven from here, not from inside the decision sheet, because this
+        // screen owns the camera. Opening it from the sheet would restart the
+        // QR preview the moment the sheet popped — putting mobile_scanner and
+        // image_picker on the same camera at once, and leaving the detector
+        // live behind the face sheet.
+        if (outcome != null && outcome.offerFaceCheck && mounted) {
+          await showFaceCheckSheet(
+            context,
+            eventId: outcome.eventId,
+            workerName: result.workerName,
+            referencePhotoUrl: result.workerPhoto,
+          );
+        }
       }
     } on ApiException catch (error) {
       if (mounted) {
@@ -338,6 +354,21 @@ class _HintPill extends StatelessWidget {
   }
 }
 
+/// What the decision sheet hands back to the scanner screen.
+///
+/// The event id is the client-generated one that went to the server with the
+/// decision, so the face check can address the event without a round trip to
+/// discover it.
+class _DecisionOutcome {
+  const _DecisionOutcome({
+    required this.eventId,
+    required this.offerFaceCheck,
+  });
+
+  final String eventId;
+  final bool offerFaceCheck;
+}
+
 /// The allow/refuse decision. The server recommends; the guard decides.
 class _DecisionSheet extends ConsumerStatefulWidget {
   const _DecisionSheet({required this.scan});
@@ -371,9 +402,10 @@ class _DecisionSheetState extends ConsumerState<_DecisionSheet> {
     setState(() => _isSaving = true);
 
     final repository = ref.read(attendanceRepositoryProvider);
+    final eventId = repository.newEventId();
     final sent = await repository.recordDecision(
       AttendanceEventDraft(
-        id: repository.newEventId(),
+        id: eventId,
         workerId: widget.scan.workerId,
         occurredAt: DateTime.now(),
         direction: _direction,
@@ -385,9 +417,19 @@ class _DecisionSheetState extends ConsumerState<_DecisionSheet> {
 
     if (!mounted) return;
     invalidateAttendance(ref);
-    Navigator.of(context).pop();
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Hand the decision back rather than acting on it here: the scanner screen
+    // has to run the face check *before* it restarts the camera preview.
+    Navigator.of(context).pop(
+      _DecisionOutcome(
+        eventId: eventId,
+        offerFaceCheck: _shouldOfferFaceCheck(decision: decision, sent: sent),
+      ),
+    );
+
+    messenger.showSnackBar(
       SnackBar(
         content: Text(
           sent
@@ -396,6 +438,31 @@ class _DecisionSheetState extends ConsumerState<_DecisionSheet> {
         ),
       ),
     );
+  }
+
+  /// Whether a live face check is worth asking the guard for.
+  ///
+  /// Every condition here exists to avoid wasting a guard's time at a gate with
+  /// someone standing in front of them:
+  ///
+  ///   * **Allowed only.** A refusal has already been decided by a human, and
+  ///     the server's check only ever downgrades an *allowed* event to review.
+  ///   * **Online only.** The comparison addresses an event by id; if the
+  ///     decision is still sitting in the offline queue there is nothing on the
+  ///     server to attach a photo to.
+  ///   * **A reference photo must exist.** Without one the backend can only
+  ///     answer "unavailable", so asking for a photo would cost a gate
+  ///     interaction to learn nothing.
+  ///   * **The feature flag.** ENABLE_FACE_VERIFICATION in .env.
+  bool _shouldOfferFaceCheck({
+    required GateDecision decision,
+    required bool sent,
+  }) {
+    if (!AppConfig.faceVerificationEnabled) return false;
+    if (decision != GateDecision.allowed) return false;
+    if (!sent) return false;
+    final photo = widget.scan.workerPhoto;
+    return photo != null && photo.isNotEmpty;
   }
 
   @override

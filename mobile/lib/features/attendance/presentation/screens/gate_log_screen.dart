@@ -1,10 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/config/app_config.dart';
 import '../../../../core/errors/api_exception.dart';
 import '../../../../shared/design_system.dart';
 import '../../data/models/attendance_models.dart';
 import '../providers/attendance_provider.dart';
+import 'face_check_sheet.dart';
+
+/// Whether a face check can be offered for [event].
+///
+/// Needs a reference photo to compare against — without one the server can only
+/// answer "unavailable", so showing the button would cost a tap to learn
+/// nothing. Everything in this screen came from the server, so unlike the
+/// scanner there is no question of the event existing yet.
+bool _canFaceCheck(AttendanceEvent event) =>
+    AppConfig.faceVerificationEnabled &&
+    (event.workerPhoto?.isNotEmpty ?? false);
 
 /// Modules 7.5 and 7.6 — today's gate log, and the manual fallback.
 ///
@@ -198,6 +210,27 @@ class _ReviewCardState extends ConsumerState<_ReviewCard> {
               const SizedBox(height: 6),
               Text(event.decisionReason, style: const TextStyle(fontSize: 13)),
             ],
+            // Retaking is the most useful thing a guard can do here: poor light
+            // and a side-on angle are the usual reasons a real face scores low,
+            // and both are fixed by another photo rather than by a judgement
+            // call the guard would otherwise have to make blind.
+            if (_canFaceCheck(event)) ...[
+              const SizedBox(height: 10),
+              AppButton.secondary(
+                label: event.faceChecked
+                    ? 'Take another photo'
+                    : 'Check this face',
+                icon: Icons.photo_camera_rounded,
+                onPressed: _isBusy
+                    ? null
+                    : () => showFaceCheckSheet(
+                          context,
+                          eventId: event.id,
+                          workerName: event.workerName,
+                          referencePhotoUrl: event.workerPhoto,
+                        ),
+              ),
+            ],
             const SizedBox(height: 14),
             if (_isBusy)
               const Center(child: CircularProgressIndicator())
@@ -382,14 +415,49 @@ class _EventTile extends StatelessWidget {
             if (event.wasOffline) 'synced later',
           ].join(' · '),
         ),
-        trailing: event.wasOverridden
-            ? const Tooltip(
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (event.wasOverridden)
+              const Tooltip(
                 message: 'Decided by a guard after a face check',
                 child: Icon(Icons.how_to_reg, size: 20),
-              )
-            : null,
+              ),
+            // Standalone face check, independent of scanning. This is the only
+            // way to check an entry that was logged offline and synced later:
+            // those never had a server event at the moment of the decision, so
+            // the scanner could not offer it.
+            if (_canFaceCheck(event))
+              IconButton(
+                tooltip: event.faceChecked
+                    ? 'Checked — run it again'
+                    : 'Check this face',
+                icon: Icon(_faceIcon, color: _faceIconColour, size: 22),
+                onPressed: () => showFaceCheckSheet(
+                  context,
+                  eventId: event.id,
+                  workerName: event.workerName,
+                  referencePhotoUrl: event.workerPhoto,
+                ),
+              ),
+          ],
+        ),
       ),
     );
+  }
+
+  /// Mirrors the three outcomes rather than a plain yes/no: an entry that was
+  /// never checked must not look like one that was checked and failed.
+  IconData get _faceIcon {
+    if (!event.faceChecked) return Icons.photo_camera_outlined;
+    return event.faceVerified
+        ? Icons.verified_rounded
+        : Icons.remove_red_eye_outlined;
+  }
+
+  Color get _faceIconColour {
+    if (!event.faceChecked) return AppColors.textSecondary;
+    return event.faceVerified ? AppColors.success : AppColors.warning;
   }
 }
 
