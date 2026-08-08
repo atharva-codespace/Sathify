@@ -103,6 +103,16 @@ class ApiEndpoints {
   static String engagementTransition(int engagementId) =>
       '/hiring/engagements/$engagementId/transition/';
 
+  /// 4.6 — give notice. Distinct from `transition`'s `terminate` action on
+  /// purpose: notice is the ordinary way an arrangement ends, and terminate is
+  /// the exceptional one. Sharing an endpoint would make the exceptional path
+  /// as easy to reach as the ordinary one.
+  static String giveNotice(int engagementId) =>
+      '/hiring/engagements/$engagementId/notice/';
+
+  static String withdrawNotice(int engagementId) =>
+      '/hiring/engagements/$engagementId/notice/withdraw/';
+
   // --- Module 5: One-Day Service Booking -------------------------------------
   /// 5.1 — the bookable catalogue, with duration and price guidance.
   static const String serviceCategories = '/bookings/categories/';
@@ -149,6 +159,25 @@ class ApiEndpoints {
 
   /// 6.3 — pre-flight check before committing to a slot.
   static const String conflictCheck = '/scheduling/conflicts/check/';
+
+  /// 6.5 — urgent leave ("chutti"). GET lists what the caller can see; POST
+  /// applies, and the server approves it in the same response.
+  static const String leaveRequests = '/scheduling/leave/';
+
+  /// The household's answer: do you need somebody else that day?
+  static String leaveResponse(int leaveId) =>
+      '/scheduling/leave/$leaveId/response/';
+
+  /// Workers free to cover, ranked by the Module 4.3 scorer.
+  static String replacementCandidates(int leaveId) =>
+      '/scheduling/leave/$leaveId/candidates/';
+
+  /// Confirms who is covering, and settles their pay server-side.
+  static String assignReplacement(int leaveId) =>
+      '/scheduling/leave/$leaveId/replacement/';
+
+  static String withdrawLeave(int leaveId) =>
+      '/scheduling/leave/$leaveId/withdraw/';
 
   /// 6.4 — reminders ready to deliver.
   static const String dueReminders = '/scheduling/reminders/due/';

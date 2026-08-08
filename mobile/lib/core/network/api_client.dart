@@ -19,6 +19,13 @@ import '../storage/token_storage.dart';
 /// [_refreshCompleter], so we never fire N parallel refreshes and invalidate
 /// each other's rotated tokens — the backend has ROTATE_REFRESH_TOKENS on, so
 /// a race here would log the user out.
+///
+/// Cold starts: the API sleeps after 15 minutes idle on Render's free tier and
+/// takes roughly 50 seconds to wake, during which its router answers 502/503 or
+/// simply holds the socket. That is not an error the user did anything to
+/// cause, and showing them "couldn't reach the server" for it trains them to
+/// distrust an app that was about to work. [_shouldRetryTransient] absorbs it —
+/// see that method for which failures are safe to replay and which are not.
 class ApiClient {
   ApiClient({
     Dio? dio,
@@ -51,6 +58,14 @@ class ApiClient {
   final void Function()? onSessionExpired;
 
   Completer<bool>? _refreshCompleter;
+
+  /// Carries the replay count on a request so the recursion terminates.
+  static const String _attemptKey = 'sathify.transientAttempt';
+
+  /// Two replays on top of the original. With the timeouts in `.env` that
+  /// covers a ~50 s wake without leaving somebody staring at a dead screen if
+  /// the service is genuinely down.
+  static const int _maxTransientAttempts = 2;
 
   Dio get raw => _dio;
 
@@ -94,9 +109,69 @@ class ApiClient {
       }
       await _tokenStorage.clear();
       onSessionExpired?.call();
+      return handler.next(error);
     }
+
+    // A sleeping server, most likely. Wait and try again before troubling the
+    // user. The replay goes back through this interceptor, so the attempt
+    // counter travels in `extra` and the recursion is what bounds the loop.
+    final attempt = (error.requestOptions.extra[_attemptKey] as int? ?? 0) + 1;
+    if (attempt <= _maxTransientAttempts && _shouldRetryTransient(error)) {
+      await Future<void>.delayed(_backoffFor(attempt));
+      try {
+        final response = await _retry(error.requestOptions, attempt: attempt);
+        return handler.resolve(response);
+      } on DioException catch (e) {
+        return handler.next(e);
+      }
+    }
+
     handler.next(error);
   }
+
+  /// Whether [error] is worth replaying.
+  ///
+  /// The line is "did the server get a chance to act on this request?", because
+  /// replaying one it already processed is how a worker ends up with two
+  /// identical bookings or a resident pays twice.
+  ///
+  /// * Connect failures and connect timeouts never reached the application, so
+  ///   any method is safe.
+  /// * 502/503/504 come from Render's router while the instance boots, so the
+  ///   application never saw the body either. 500 is deliberately excluded: the
+  ///   server *did* run, and repeating whatever crashed it will crash it again.
+  /// * A receive timeout means the request landed and the answer was too slow.
+  ///   Only reads may be replayed.
+  ///
+  /// The refresh endpoint is never retried: it rotates the refresh token, so a
+  /// replay can spend a token whose response was merely lost in transit and
+  /// sign the user out of their own session.
+  bool _shouldRetryTransient(DioException error) {
+    if (error.requestOptions.path == ApiEndpoints.refresh) return false;
+
+    final method = error.requestOptions.method.toUpperCase();
+    final isRead = method == 'GET' || method == 'HEAD';
+    final status = error.response?.statusCode;
+
+    if (status != null) {
+      return const {502, 503, 504}.contains(status);
+    }
+
+    switch (error.type) {
+      case DioExceptionType.connectionError:
+      case DioExceptionType.connectionTimeout:
+        return true;
+      case DioExceptionType.receiveTimeout:
+        return isRead;
+      default:
+        return false;
+    }
+  }
+
+  /// Grows with each attempt: a waking instance needs tens of seconds, and
+  /// hammering it every second only competes with its own boot for CPU.
+  Duration _backoffFor(int attempt) =>
+      Duration(milliseconds: 800 * (1 << (attempt - 1)));
 
   /// Exchanges the refresh token for a new access token.
   ///
@@ -151,17 +226,31 @@ class ApiClient {
     }
   }
 
-  Future<Response<dynamic>> _retry(RequestOptions requestOptions) async {
+  Future<Response<dynamic>> _retry(
+    RequestOptions requestOptions, {
+    int attempt = 0,
+  }) async {
     final token = await _tokenStorage.readAccessToken();
+    final data = requestOptions.data;
+
     return _dio.request<dynamic>(
       requestOptions.path,
-      data: requestOptions.data,
+      // A FormData's byte streams are consumed by the attempt that failed, so
+      // re-sending the same instance uploads nothing. This is what makes a
+      // retried Aadhaar or gate photo actually arrive.
+      data: data is FormData ? data.clone() : data,
       queryParameters: requestOptions.queryParameters,
       options: Options(
         method: requestOptions.method,
+        contentType: requestOptions.contentType,
+        responseType: requestOptions.responseType,
         headers: {
           ...requestOptions.headers,
           if (token != null) 'Authorization': 'Bearer $token',
+        },
+        extra: {
+          ...requestOptions.extra,
+          if (attempt > 0) _attemptKey: attempt,
         },
       ),
     );

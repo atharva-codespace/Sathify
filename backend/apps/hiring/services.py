@@ -32,6 +32,7 @@ from apps.notifications.models import NotificationCategory
 from apps.workers.models import WorkerProfile
 
 from .models import (
+    NOTICE_PERIOD_DAYS,
     Engagement,
     EngagementStatus,
     HireRequest,
@@ -373,3 +374,207 @@ def worker_verification(worker: WorkerProfile) -> dict:
         "id_masked": kyc.masked_aadhaar if kyc else None,
         "reviewed_at": worker.reviewed_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# 4.6 Notice period
+# ---------------------------------------------------------------------------
+#
+#   ACTIVE ──give_notice(last_day)──► ACTIVE, serving notice ──► TERMINATED
+#     │           refuses a day inside      visits still run,     once the last
+#     │           the 10-day window         gate still admits,    working day
+#     │                                     attendance counts     has passed
+#     │
+#     └── terminate(reason) ──► TERMINATED immediately
+#         the exceptional path: abuse, safety, mutual consent
+#
+# WHY NOTICE IS NOT ENFORCED BY WITHHOLDING PAY
+# ---------------------------------------------
+# The obvious lever is to dock a worker who leaves early. It is the wrong lever,
+# on three counts:
+#
+#   * Wages for days already worked are earned. Withholding them as a penalty is
+#     legally exposed under the Payment of Wages Act, and it lands hardest on the
+#     workers least able to contest it — which is the population this platform
+#     exists to serve.
+#   * It is counterproductive. A worker who knows that leaving costs them a
+#     week's pay does not give notice; they stop turning up, and the household
+#     gets *less* warning, which is the exact harm the rule exists to prevent.
+#   * The rule's purpose is warning, not compensation. Ten days is how long a
+#     household needs to find somebody, and that purpose is served the moment
+#     notice is given.
+#
+# So the enforcement is reputational and factual: notice given and served is
+# unremarkable, and leaving without it is recorded on the trust score
+# (apps/ratings/trust.py) where it decays over time rather than costing somebody
+# a week's food.
+
+
+class NoticeTooShort(HiringError):
+    """The requested last working day falls inside the notice period."""
+
+    code = "notice_too_short"
+
+
+class NoticeAlreadyGiven(HiringError):
+    """Notice has already been given on this engagement."""
+
+    code = "notice_already_given"
+
+
+def earliest_last_working_day(*, today=None) -> dt.date:
+    """The soonest an engagement may end. Mirrored by ``NoticePeriod`` in Dart."""
+    return (today or timezone.localdate()) + dt.timedelta(days=NOTICE_PERIOD_DAYS)
+
+
+@transaction.atomic
+def give_notice(engagement, *, by, reason: str = "", requested_last_day=None):
+    """Start the notice period on an active engagement.
+
+    Either side may give notice. ``reason`` records which — it is one of
+    ``EngagementEndReason`` — because "the worker left" and "the household let
+    her go" are very different facts about a worker, and Module 9 reads them.
+
+    The engagement stays ACTIVE and its schedule keeps producing visits. Nothing
+    about the gate, attendance or payments changes until the last working day
+    passes.
+    """
+    locked = Engagement.objects.select_for_update().get(pk=engagement.pk)
+
+    if locked.status != EngagementStatus.ACTIVE:
+        raise RequestNotActionable(
+            "Only an active engagement can be given notice."
+        )
+    if locked.last_working_day is not None:
+        raise NoticeAlreadyGiven(
+            f"Notice was already given. The last working day is "
+            f"{locked.last_working_day:%d %b %Y}."
+        )
+
+    earliest = earliest_last_working_day()
+    last_day = requested_last_day or earliest
+
+    if last_day < earliest:
+        raise NoticeTooShort(
+            f"The agreed notice period is {NOTICE_PERIOD_DAYS} days, so the "
+            f"earliest last day is {earliest:%d %b %Y}."
+        )
+
+    locked.notice_given_at = timezone.now()
+    locked.notice_given_by = by
+    locked.last_working_day = last_day
+    if reason:
+        locked.end_reason = reason
+    locked.save(
+        update_fields=[
+            "notice_given_at",
+            "notice_given_by",
+            "last_working_day",
+            "end_reason",
+            "updated_at",
+        ]
+    )
+
+    visits = locked.visits_remaining()
+    ending = "your last day" if by == locked.worker.user else "their last day"
+
+    # Both sides are told, whichever gave it. The household needs the warning;
+    # the worker needs the date in writing, because "she said I could stay till
+    # the end of the month" is exactly the dispute this record settles.
+    _notify(
+        recipient=locked.resident.user,
+        category=NotificationCategory.HIRE,
+        title=f"{locked.worker.user.get_full_name()} is finishing on "
+        f"{last_day:%d %b}",
+        body=(
+            f"{visits} more visit{'s' if visits != 1 else ''} before then. "
+            "You can search for someone else now."
+        ),
+        route="/engagements",
+    )
+    _notify(
+        recipient=locked.worker.user,
+        category=NotificationCategory.HIRE,
+        title=f"Notice recorded — {ending} is {last_day:%d %b}",
+        body=(
+            f"You have {visits} more visit{'s' if visits != 1 else ''} at "
+            f"{locked.resident.flat}. You will be paid for every day you work."
+        ),
+        route="/engagements",
+    )
+
+    logger.info(
+        "Notice given on engagement %s by user %s, last working day %s",
+        locked.pk, getattr(by, "pk", None), last_day,
+    )
+    return locked
+
+
+def close_engagements_past_notice(*, today=None) -> int:
+    """Close engagements whose last working day has gone by. Returns how many.
+
+    Idempotent and cheap, because there is no scheduler on the free tier
+    (docs/free-tier-constraints.md §7) and this therefore runs from a read path —
+    the engagement list view calls it. The same lazy-sweep convention as hire
+    request expiry and Module 6.5's leave.
+    """
+    today = today or timezone.localdate()
+    closed = 0
+
+    for engagement in Engagement.objects.past_notice(today=today).select_related(
+        "worker__user", "resident__user"
+    ):
+        if engagement.finish_notice():
+            closed += 1
+            _notify(
+                recipient=engagement.worker.user,
+                category=NotificationCategory.HIRE,
+                title="Your work here has finished",
+                body=(
+                    f"{engagement.resident.flat} — thank you. Your final "
+                    "payment covers every day you worked."
+                ),
+                route="/engagements",
+            )
+
+    if closed:
+        logger.info("Closed %s engagement(s) past their notice period", closed)
+    return closed
+
+
+def withdraw_notice(engagement, *, by=None):
+    """Both sides changed their mind. Only possible while the day has not passed.
+
+    Kept deliberately simple: it clears the end date and the engagement carries
+    on. There is no partial state where notice was "half withdrawn", because the
+    only question anybody asks of this record is "is there a last day, and when".
+    """
+    if not engagement.is_serving_notice:
+        raise RequestNotActionable("This engagement is not serving notice.")
+    if engagement.last_working_day < timezone.localdate():
+        raise RequestNotActionable(
+            "The last working day has passed, so notice can no longer be withdrawn."
+        )
+
+    engagement.notice_given_at = None
+    engagement.notice_given_by = None
+    engagement.last_working_day = None
+    engagement.end_reason = ""
+    engagement.save(
+        update_fields=[
+            "notice_given_at",
+            "notice_given_by",
+            "last_working_day",
+            "end_reason",
+            "updated_at",
+        ]
+    )
+
+    _notify(
+        recipient=engagement.worker.user,
+        category=NotificationCategory.HIRE,
+        title="Notice withdrawn",
+        body=f"Your work at {engagement.resident.flat} continues as before.",
+        route="/engagements",
+    )
+    return engagement

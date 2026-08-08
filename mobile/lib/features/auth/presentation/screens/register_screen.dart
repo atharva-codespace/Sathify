@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../../core/routing/app_router.dart';
 import '../../../societies/data/models/society_models.dart';
 import '../../../societies/presentation/providers/society_provider.dart';
 import '../../data/models/user_model.dart';
@@ -72,15 +74,25 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
     if (!mounted) return;
     if (succeeded) {
-      // Deliberately not awaited: registration is finished either way, and the
-      // dialog's dismissal is the user's business, not this method's.
-      unawaited(
-        showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => _RegistrationSuccessDialog(isWorker: _isWorker),
-        ),
+      // Awaited, so that *this* screen owns what happens next.
+      //
+      // The dialog used to navigate for itself with two bare
+      // `Navigator.of(context).pop()` calls — one for itself and one meant for
+      // this screen. Under go_router the second pop is not this screen's: the
+      // routes live in the ShellRoute's nested navigator, so it hits the root
+      // navigator's last route and takes the app down with it. The dialog now
+      // only closes itself, and the route change happens here.
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _RegistrationSuccessDialog(isWorker: _isWorker),
       );
+
+      if (!mounted) return;
+      // `go`, not `pop`: registration is a finished chapter, and this works
+      // identically whether the screen was pushed from sign-in or opened
+      // cold from a deep link — where there is nothing to pop at all.
+      context.go(Routes.login);
     }
   }
 
@@ -311,10 +323,10 @@ class _RegistrationSuccessDialog extends StatelessWidget {
       ),
       actions: [
         TextButton(
-          onPressed: () {
-            Navigator.of(context).pop();
-            Navigator.of(context).pop();
-          },
+          // Closes the dialog and nothing else. The screen underneath awaits
+          // this and handles the route change; popping twice from here reaches
+          // past go_router's navigator and crashes.
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Go to sign in'),
         ),
       ],

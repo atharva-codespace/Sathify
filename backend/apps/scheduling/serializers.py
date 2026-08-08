@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from .models import DEFAULT_GRACE_MINUTES, Reminder, TaskTiming
+from apps.payments.models import format_paise
+
+from .models import DEFAULT_GRACE_MINUTES, LeaveRequest, Reminder, TaskTiming
 
 
 class ScheduleItemSerializer(serializers.Serializer):
@@ -37,6 +39,14 @@ class ScheduleItemSerializer(serializers.Serializer):
     expected_arrival = serializers.TimeField(read_only=True, allow_null=True)
     grace_minutes = serializers.IntegerField(read_only=True)
     task_notes = serializers.CharField(read_only=True)
+
+    # --- 6.5 urgent leave ---------------------------------------------------
+    on_leave = serializers.BooleanField(read_only=True)
+    leave_status = serializers.CharField(read_only=True)
+    leave_request_id = serializers.IntegerField(read_only=True)
+    cover_worker_name = serializers.CharField(read_only=True)
+    is_cover = serializers.BooleanField(read_only=True)
+    covering_for_name = serializers.CharField(read_only=True)
 
 
 class ScheduleConflictPairSerializer(serializers.Serializer):
@@ -185,3 +195,122 @@ class ReminderDeliverySerializer(serializers.Serializer):
     failure_reason = serializers.CharField(
         required=False, allow_blank=True, default="", max_length=200
     )
+
+
+# ---------------------------------------------------------------------------
+# 6.5 Urgent leave
+# ---------------------------------------------------------------------------
+
+
+class LeaveRequestSerializer(serializers.ModelSerializer):
+    """One day of leave and everything that has happened to it.
+
+    Amounts are exposed in paise, like every other money field on the platform,
+    with a formatted copy alongside — the app should never do currency
+    arithmetic, and a formatted string it can print is what stops it trying.
+    """
+
+    worker_name = serializers.CharField(source="worker.user.get_full_name", read_only=True)
+    resident_name = serializers.CharField(
+        source="engagement.resident.user.get_full_name", read_only=True
+    )
+    flat_label = serializers.CharField(source="engagement.resident.flat", read_only=True)
+    replacement_name = serializers.SerializerMethodField()
+    start_time = serializers.TimeField(source="engagement.start_time", read_only=True)
+
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    summary = serializers.CharField(read_only=True)
+    needs_resident_response = serializers.BooleanField(read_only=True)
+    can_withdraw = serializers.BooleanField(read_only=True)
+    is_covered = serializers.BooleanField(read_only=True)
+    is_settled = serializers.BooleanField(read_only=True)
+
+    replacement_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LeaveRequest
+        fields = [
+            "id",
+            "engagement",
+            "leave_date",
+            "reason",
+            "status",
+            "status_display",
+            "summary",
+            "worker",
+            "worker_name",
+            "resident_name",
+            "flat_label",
+            "start_time",
+            "replacement",
+            "replacement_name",
+            "replacement_confirmed_at",
+            "resident_responded_at",
+            "day_rate_paise",
+            "forgone_paise",
+            "replacement_paise",
+            "replacement_display",
+            "settled_at",
+            "needs_resident_response",
+            "can_withdraw",
+            "is_covered",
+            "is_settled",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_replacement_name(self, obj) -> str:
+        return obj.replacement.user.get_full_name() if obj.replacement_id else ""
+
+    def get_replacement_display(self, obj) -> str:
+        return format_paise(obj.replacement_paise)
+
+
+class LeaveCreateSerializer(serializers.Serializer):
+    """Module 6.5 — a worker asks for a day off.
+
+    ``reason`` is optional and stays optional. A worker should not have to
+    describe a private emergency to a form in order to be believed, and a
+    required field here would mostly collect fiction.
+    """
+
+    engagement = serializers.IntegerField()
+    leave_date = serializers.DateField()
+    reason = serializers.CharField(
+        required=False, allow_blank=True, default="", max_length=200
+    )
+
+
+class LeaveResponseSerializer(serializers.Serializer):
+    """The household's answer: do you need somebody else that day?
+
+    Note what is *not* here: there is no way to refuse the leave. The worker is
+    not asking permission — see ``LeaveRequest``.
+    """
+
+    needs_replacement = serializers.BooleanField()
+
+
+class ReplacementAssignSerializer(serializers.Serializer):
+    """Who is covering."""
+
+    replacement = serializers.IntegerField()
+
+
+class ReplacementCandidateSerializer(serializers.Serializer):
+    """A worker who could cover, with the score that put them there.
+
+    The breakdown travels with the suggestion because Module 4.3 established
+    that a ranking a resident cannot account for is a ranking they will not
+    trust — and this one is being read in a hurry.
+    """
+
+    worker_id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    photo_url = serializers.CharField(read_only=True, allow_blank=True)
+    trust_score = serializers.FloatField(read_only=True)
+    average_rating = serializers.FloatField(read_only=True)
+    rating_count = serializers.IntegerField(read_only=True)
+    match_score = serializers.FloatField(read_only=True)
+    match_percentage = serializers.IntegerField(read_only=True)
+    components = serializers.ListField(read_only=True)

@@ -108,6 +108,46 @@ class SalaryBasis:
         )
 
 
+def _visits_from_terms(engagement, period_start: dt.date, period_end: dt.date) -> int:
+    """Visits the terms call for, bounded by the engagement's own lifetime.
+
+    The derived schedule expands **active** engagements only, which is right for
+    a calendar and wrong for a final payslip: a worker who has just finished
+    their notice period looks, to ``worker_schedule``, like somebody with nothing
+    scheduled — and the "nothing scheduled, so the full rate stands" fallback
+    below would then suggest a whole month's pay for a fortnight's work.
+
+    So when the schedule cannot answer, the terms are expanded directly and
+    clipped to the days the engagement actually ran: never before it started,
+    never after its last working day.
+    """
+    days = set(engagement.days_of_week)
+    if not days:
+        return 0
+
+    start = period_start
+    if engagement.started_on:
+        start = max(start, engagement.started_on)
+
+    end = period_end
+    finished = engagement.last_working_day
+    if finished is None and engagement.ended_at is not None:
+        finished = timezone.localtime(engagement.ended_at).date()
+    if finished is not None:
+        end = min(end, finished)
+
+    if end < start:
+        return 0
+
+    count = 0
+    day = start
+    while day <= end:
+        if day.weekday() in days:
+            count += 1
+        day += dt.timedelta(days=1)
+    return count
+
+
 def salary_basis(engagement, *, period_start: dt.date, period_end: dt.date) -> SalaryBasis:
     """Pro-rate an engagement's monthly rate by attendance over a period.
 
@@ -115,7 +155,14 @@ def salary_basis(engagement, *, period_start: dt.date, period_end: dt.date) -> S
     worker's calendar and payroll all count the same days. Attended visits are
     gate entries that were *allowed* — a denied or still-pending entry is not
     attendance.
+
+    A finished engagement is the one case the schedule cannot answer for; see
+    :func:`_visits_from_terms`. This is what makes the Module 4.6 notice period's
+    promise — "paid in full, for the days worked" — actually true on the final
+    payslip rather than only in the wording.
     """
+    from apps.hiring.models import EngagementStatus
+
     full_rate = rupees_to_paise(engagement.monthly_rate)
 
     expected = [
@@ -123,6 +170,10 @@ def salary_basis(engagement, *, period_start: dt.date, period_end: dt.date) -> S
         for item in worker_schedule(engagement.worker_id, period_start, period_end)
         if item.source == "engagement" and item.source_id == engagement.pk
     ]
+    expected_count = len(expected)
+
+    if expected_count == 0 and engagement.status != EngagementStatus.ACTIVE:
+        expected_count = _visits_from_terms(engagement, period_start, period_end)
 
     attended = (
         AttendanceEvent.objects.filter(
@@ -139,17 +190,17 @@ def salary_basis(engagement, *, period_start: dt.date, period_end: dt.date) -> S
         .count()
     )
 
-    if not expected:
+    if not expected_count:
         # Nothing was scheduled, so there is nothing to pro-rate against.
         # Suggesting zero would be as wrong as suggesting the full rate, so the
         # full rate stands and a person decides.
         suggested = full_rate
     else:
-        capped = min(attended, len(expected))
-        suggested = full_rate * capped // len(expected)
+        capped = min(attended, expected_count)
+        suggested = full_rate * capped // expected_count
 
     return SalaryBasis(
-        expected_visits=len(expected),
+        expected_visits=expected_count,
         attended_visits=attended,
         full_rate_paise=full_rate,
         suggested_paise=suggested,

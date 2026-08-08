@@ -38,6 +38,10 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+#: The in-app route a complaint notification opens. Named here rather than
+#: inlined so there is one place to keep in step with the Flutter route table.
+COMPLAINTS_ROUTE = "/complaints"
+
 #: How many complaints one sweep will escalate. Bounded so a society that has
 #: been unattended for a month cannot turn one queue load into a thousand
 #: notifications on a 512 MB instance.
@@ -108,7 +112,12 @@ def _notify_admins(society_id, *, title: str, body: str) -> int:
     """
     admins = list(_society_admins(society_id))
     for admin in admins:
-        _notify(recipient=admin, title=title, body=body, route="/admin/complaints")
+        # "/complaints", not "/admin/complaints": the app has one complaints
+        # route for every role and shows the society queue to an administrator.
+        # A route the client cannot match is a crash on tapping the
+        # notification, so this string is part of the client contract — see
+        # `Routes` in mobile/lib/core/routing/app_router.dart.
+        _notify(recipient=admin, title=title, body=body, route=COMPLAINTS_ROUTE)
     return len(admins)
 
 

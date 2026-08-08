@@ -41,6 +41,18 @@ class _MyScheduleScreenState extends ConsumerState<MyScheduleScreen>
     final isWorker = ref.watch(authProvider).user?.role == UserRole.worker;
 
     return Scaffold(
+      // Module 6.5 — a worker telling the household they cannot come is urgent
+      // and one-handed, often on the way to somewhere else. It gets the primary
+      // action on their home screen rather than a menu item three taps deep:
+      // every tap between the worker and this button is time the household does
+      // not get to arrange cover.
+      floatingActionButton: isWorker
+          ? FloatingActionButton.extended(
+              onPressed: () => context.push(Routes.applyLeave),
+              icon: const Icon(Icons.event_busy_outlined),
+              label: const Text('Take a day off'),
+            )
+          : null,
       appBar: AppBar(
         title: Text(isWorker ? 'My schedule' : "Who's coming"),
         actions: [
@@ -331,9 +343,19 @@ class _ScheduleCard extends ConsumerWidget {
     // a one-day booking's times were agreed when it was made.
     final canEditTiming = !isWorker && item.isRecurring;
 
+    // A day with leave on it opens the leave, not the timing sheet: whether
+    // somebody is coming at all is a more urgent question than what time they
+    // were expected.
+    final leaveId = item.leaveRequestId;
+    final opensLeave = leaveId > 0;
+
     return AppCard(
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-      onTap: canEditTiming ? () => _openTiming(context, ref) : null,
+      onTap: opensLeave
+          ? () => context.push(Routes.leaveDetailPath(leaveId))
+          : canEditTiming
+              ? () => _openTiming(context, ref)
+              : null,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -367,6 +389,30 @@ class _ScheduleCard extends ConsumerWidget {
                     colour: AppColors.warning,
                   ),
                 ],
+                // Module 6.5 — the visit stays listed and says what happened to
+                // it. An absence that silently removed the row would leave a
+                // household wondering whether they had misremembered the day.
+                if (item.isCover) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  _Flag(
+                    icon: Icons.swap_horiz_rounded,
+                    label: 'Covering for ${item.coveringForName}',
+                    colour: AppColors.success,
+                  ),
+                ] else if (item.onLeave) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  _Flag(
+                    icon: item.isUncovered
+                        ? Icons.event_busy_outlined
+                        : Icons.how_to_reg_outlined,
+                    label: item.isUncovered
+                        ? (isWorker ? 'You are on leave' : 'On leave — no cover yet')
+                        : '${item.coverWorkerName} is covering',
+                    colour: item.isUncovered
+                        ? AppColors.warning
+                        : AppColors.success,
+                  ),
+                ],
                 if (item.graceMinutes > 0) ...[
                   const SizedBox(height: AppSpacing.xxs + 2),
                   _Flag(
@@ -393,7 +439,7 @@ class _ScheduleCard extends ConsumerWidget {
               ],
             ),
           ),
-          if (canEditTiming)
+          if (canEditTiming || opensLeave)
             const Icon(
               Icons.chevron_right_rounded,
               color: AppColors.textTertiary,

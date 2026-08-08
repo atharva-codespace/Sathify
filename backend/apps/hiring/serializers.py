@@ -319,6 +319,11 @@ class EngagementSerializer(serializers.ModelSerializer):
     day_labels = serializers.ListField(child=serializers.CharField(), read_only=True)
     end_time = serializers.TimeField(read_only=True)
 
+    # --- 4.6 notice period ---------------------------------------------------
+    is_serving_notice = serializers.BooleanField(read_only=True)
+    notice_days_remaining = serializers.IntegerField(read_only=True)
+    visits_remaining = serializers.SerializerMethodField()
+
     class Meta:
         model = Engagement
         fields = [
@@ -342,6 +347,11 @@ class EngagementSerializer(serializers.ModelSerializer):
             "paused_at",
             "pause_reason",
             "resumed_at",
+            "notice_given_at",
+            "last_working_day",
+            "is_serving_notice",
+            "notice_days_remaining",
+            "visits_remaining",
             "ended_at",
             "end_reason",
             "end_note",
@@ -349,6 +359,36 @@ class EngagementSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_visits_remaining(self, obj) -> int:
+        """Visits left before the last working day, not calendar days.
+
+        Ten days of notice on a Tuesday-only engagement is one more visit, and
+        that is the number both sides actually plan around.
+        """
+        return obj.visits_remaining()
+
+
+class GiveNoticeSerializer(serializers.Serializer):
+    """Module 4.6 — either side ends the arrangement, with ten days' notice.
+
+    Separate from :class:`EngagementTransitionSerializer` on purpose. Notice is
+    the *ordinary* way an engagement ends and terminate is the exceptional one —
+    abuse, safety, mutual consent — and folding them into one action list would
+    make the exceptional path the same shape as the ordinary one, which is
+    exactly how it gets reached by accident.
+    """
+
+    reason = serializers.ChoiceField(choices=EngagementEndReason.choices)
+
+    #: Optional. Omitted means the earliest permitted day, which is what most
+    #: people want; supplying one lets somebody work a fortnight instead of ten
+    #: days. Anything *shorter* is refused by the service.
+    last_working_day = serializers.DateField(required=False, allow_null=True)
+
+    note = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, default=""
+    )
 
 
 class EngagementTransitionSerializer(serializers.Serializer):

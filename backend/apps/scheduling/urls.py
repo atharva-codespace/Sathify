@@ -34,4 +34,27 @@ urlpatterns = [
         views.ReminderDeliveredView.as_view(),
         name="reminder-delivered",
     ),
+
+    # --- 6.5 Urgent leave ("chutti") ----------------------------------------
+    path("leave/", views.LeaveListCreateView.as_view(), name="leave-list"),
+    path(
+        "leave/<int:pk>/response/",
+        views.LeaveResponseView.as_view(),
+        name="leave-response",
+    ),
+    path(
+        "leave/<int:pk>/candidates/",
+        views.ReplacementCandidatesView.as_view(),
+        name="leave-candidates",
+    ),
+    path(
+        "leave/<int:pk>/replacement/",
+        views.AssignReplacementView.as_view(),
+        name="leave-replacement",
+    ),
+    path(
+        "leave/<int:pk>/withdraw/",
+        views.WithdrawLeaveView.as_view(),
+        name="leave-withdraw",
+    ),
 ]

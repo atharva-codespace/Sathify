@@ -57,6 +57,12 @@ class ScheduleItem {
     this.expectedArrival,
     this.graceMinutes = 0,
     this.taskNotes = '',
+    this.onLeave = false,
+    this.leaveStatus = '',
+    this.leaveRequestId = 0,
+    this.coverWorkerName = '',
+    this.isCover = false,
+    this.coveringForName = '',
   });
 
   final ScheduleSource source;
@@ -85,6 +91,28 @@ class ScheduleItem {
   final String? expectedArrival;
   final int graceMinutes;
   final String taskNotes;
+
+  // --- 6.5 urgent leave ------------------------------------------------------
+  //
+  // A visit the regular worker is away for stays on the schedule rather than
+  // vanishing from it. Everyone involved needs to see that the slot exists and
+  // who — if anyone — is filling it.
+
+  /// The regular worker has taken this day off.
+  final bool onLeave;
+  final String leaveStatus;
+  final int leaveRequestId;
+
+  /// Who is covering, on the regular worker's and the household's views.
+  final String coverWorkerName;
+
+  /// True on the *replacement's* own schedule: somebody else's visit that they
+  /// agreed to take for one day.
+  final bool isCover;
+  final String coveringForName;
+
+  /// Nobody is coming: leave was taken and no cover was arranged.
+  bool get isUncovered => onLeave && coverWorkerName.isEmpty;
 
   bool get isRecurring => source == ScheduleSource.engagement;
 
@@ -133,6 +161,167 @@ class ScheduleItem {
         expectedArrival: json['expected_arrival'] as String?,
         graceMinutes: json['grace_minutes'] as int? ?? 0,
         taskNotes: json['task_notes'] as String? ?? '',
+        onLeave: json['on_leave'] as bool? ?? false,
+        leaveStatus: json['leave_status'] as String? ?? '',
+        leaveRequestId: json['leave_request_id'] as int? ?? 0,
+        coverWorkerName: json['cover_worker_name'] as String? ?? '',
+        isCover: json['is_cover'] as bool? ?? false,
+        coveringForName: json['covering_for_name'] as String? ?? '',
+      );
+}
+
+/// Where a leave request has got to (Module 6.5).
+///
+/// There is deliberately no "pending": leave is approved the instant it is
+/// asked for. The household is never asked whether to allow it, only whether
+/// they need somebody else that day.
+enum LeaveStatus {
+  approved('approved', 'Approved'),
+  waived('waived', 'No cover needed'),
+  replacementRequested('replacement_requested', 'Finding cover'),
+  replacementConfirmed('replacement_confirmed', 'Cover arranged'),
+  unfilled('unfilled', 'No cover found'),
+  withdrawn('withdrawn', 'Withdrawn'),
+  unknown('', '');
+
+  const LeaveStatus(this.wireValue, this.label);
+
+  final String wireValue;
+  final String label;
+
+  static LeaveStatus fromWire(String? value) => LeaveStatus.values.firstWhere(
+        (s) => s.wireValue == value,
+        orElse: () => LeaveStatus.unknown,
+      );
+
+  /// Waiting on the household to say whether they need somebody.
+  bool get awaitsHousehold => this == LeaveStatus.approved;
+}
+
+/// Module 6.5 — one day of urgent leave ("chutti").
+class LeaveRequest {
+  const LeaveRequest({
+    required this.id,
+    required this.engagementId,
+    required this.leaveDate,
+    required this.status,
+    this.reason = '',
+    this.workerId = 0,
+    this.workerName = '',
+    this.residentName = '',
+    this.flatLabel = '',
+    this.startTime = '',
+    this.replacementId,
+    this.replacementName = '',
+    this.summary = '',
+    this.dayRatePaise = 0,
+    this.forgonePaise = 0,
+    this.replacementPaise = 0,
+    this.replacementDisplay = '',
+    this.needsResidentResponse = false,
+    this.canWithdraw = false,
+    this.isCovered = false,
+    this.isSettled = false,
+  });
+
+  final int id;
+  final int engagementId;
+  final DateTime leaveDate;
+  final LeaveStatus status;
+
+  /// Always optional. A worker should not have to describe a private emergency
+  /// in order to be believed.
+  final String reason;
+
+  final int workerId;
+  final String workerName;
+  final String residentName;
+  final String flatLabel;
+  final String startTime;
+
+  final int? replacementId;
+  final String replacementName;
+
+  /// The server's one-line account of where this has got to. Preferred over
+  /// re-deriving a sentence from [status] on the client, so both sides say the
+  /// same thing.
+  final String summary;
+
+  /// Money, in paise, like everywhere else on the platform. [replacementDisplay]
+  /// is the formatted copy — the app should never do currency arithmetic.
+  final int dayRatePaise;
+  final int forgonePaise;
+  final int replacementPaise;
+  final String replacementDisplay;
+
+  final bool needsResidentResponse;
+  final bool canWithdraw;
+  final bool isCovered;
+  final bool isSettled;
+
+  String get startTimeLabel => formatScheduleTime(startTime);
+
+  factory LeaveRequest.fromJson(Map<String, dynamic> json) => LeaveRequest(
+        id: json['id'] as int,
+        engagementId: json['engagement'] as int? ?? 0,
+        leaveDate: DateTime.parse(json['leave_date'] as String),
+        status: LeaveStatus.fromWire(json['status'] as String?),
+        reason: json['reason'] as String? ?? '',
+        workerId: json['worker'] as int? ?? 0,
+        workerName: json['worker_name'] as String? ?? '',
+        residentName: json['resident_name'] as String? ?? '',
+        flatLabel: json['flat_label'] as String? ?? '',
+        startTime: json['start_time'] as String? ?? '',
+        replacementId: json['replacement'] as int?,
+        replacementName: json['replacement_name'] as String? ?? '',
+        summary: json['summary'] as String? ?? '',
+        dayRatePaise: json['day_rate_paise'] as int? ?? 0,
+        forgonePaise: json['forgone_paise'] as int? ?? 0,
+        replacementPaise: json['replacement_paise'] as int? ?? 0,
+        replacementDisplay: json['replacement_display'] as String? ?? '',
+        needsResidentResponse: json['needs_resident_response'] as bool? ?? false,
+        canWithdraw: json['can_withdraw'] as bool? ?? false,
+        isCovered: json['is_covered'] as bool? ?? false,
+        isSettled: json['is_settled'] as bool? ?? false,
+      );
+}
+
+/// A worker who could cover a visit, with the score that put them there.
+///
+/// The breakdown travels with the suggestion because Module 4.3 established
+/// that a ranking a resident cannot account for is a ranking they will not
+/// trust — and this one is being read in a hurry.
+class ReplacementCandidate {
+  const ReplacementCandidate({
+    required this.workerId,
+    required this.name,
+    this.photoUrl = '',
+    this.trustScore = 0,
+    this.averageRating = 0,
+    this.ratingCount = 0,
+    this.matchScore = 0,
+    this.matchPercentage = 0,
+  });
+
+  final int workerId;
+  final String name;
+  final String photoUrl;
+  final double trustScore;
+  final double averageRating;
+  final int ratingCount;
+  final double matchScore;
+  final int matchPercentage;
+
+  factory ReplacementCandidate.fromJson(Map<String, dynamic> json) =>
+      ReplacementCandidate(
+        workerId: json['worker_id'] as int? ?? 0,
+        name: json['name'] as String? ?? '',
+        photoUrl: json['photo_url'] as String? ?? '',
+        trustScore: (json['trust_score'] as num?)?.toDouble() ?? 0,
+        averageRating: (json['average_rating'] as num?)?.toDouble() ?? 0,
+        ratingCount: json['rating_count'] as int? ?? 0,
+        matchScore: (json['match_score'] as num?)?.toDouble() ?? 0,
+        matchPercentage: json['match_percentage'] as int? ?? 0,
       );
 }
 

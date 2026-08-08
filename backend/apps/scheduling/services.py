@@ -36,6 +36,7 @@ from django.utils import timezone
 
 from apps.bookings.models import Booking, combine_local, minutes_of, windows_overlap
 from apps.hiring.models import Engagement, weekday_of
+from apps.payments.models import format_paise
 
 from .models import Reminder, ReminderKind, ReminderStatus, TaskTiming
 from .schedule import ScheduleItem, worker_day
@@ -304,12 +305,448 @@ def due_reminders(*, society_id=None, recipient=None):
     return queryset
 
 
+# ---------------------------------------------------------------------------
+# 6.5 Urgent leave ("chutti")
+# ---------------------------------------------------------------------------
+#
+# The flow, end to end:
+#
+#   worker asks ──► APPROVED (instantly, no review) ──► resident is told
+#                                                            │
+#                              ┌─────────────────────────────┴──────┐
+#                    "I'll manage"                        "send someone"
+#                              │                                    │
+#                           WAIVED                    REPLACEMENT_REQUESTED
+#                                                                   │
+#                                              ┌────────────────────┴────────┐
+#                                     someone assigned            nobody, day passed
+#                                              │                             │
+#                                  REPLACEMENT_CONFIRMED                 UNFILLED
+#                                              │
+#                                    replacement is paid
+#
+# Every terminal state settles. WAIVED and UNFILLED both mean nobody came, and
+# they are kept apart on purpose: the first is a household that chose to manage,
+# the second is the platform failing to deliver, and only the second is worth
+# measuring.
+
+
+class LeaveError(Exception):
+    """Base class for the leave workflow's refusals."""
+
+    code = "leave_error"
+
+
+class LeaveNotActionable(LeaveError):
+    """The request is not in a state where this step makes sense."""
+
+    code = "leave_not_actionable"
+
+
+class DuplicateLeave(LeaveError):
+    """Leave already exists for this engagement on this date."""
+
+    code = "duplicate_leave"
+
+
+class LeaveDateInvalid(LeaveError):
+    """The date is in the past, or the engagement does not call for a visit."""
+
+    code = "leave_date_invalid"
+
+
+#: How far ahead leave may be requested. Urgent leave is for tomorrow, not for
+#: next quarter — a month's notice is a conversation about the engagement, not an
+#: absence, and modelling it here would put planned time off into a workflow
+#: designed around emergencies.
+MAX_LEAVE_LEAD_DAYS = 14
+
+
+def _notify_leave(recipient, *, title: str, body: str, leave, society=None) -> None:
+    """Tell someone about a leave request. Never raises — see Module 10."""
+    from apps.notifications.models import NotificationCategory
+    from apps.notifications.services import notify
+
+    notify(
+        recipient=recipient,
+        category=NotificationCategory.URGENT_LEAVE,
+        title=title,
+        body=body,
+        # "/schedule" is a route the app actually has (see Routes in
+        # mobile/lib/core/routing/app_router.dart). A route the client cannot
+        # match is a crash on tapping the notification.
+        data={"route": "/schedule", "leave_request": leave.pk},
+        society=society or leave.society,
+    )
+
+
+@transaction.atomic
+def request_leave(engagement, *, leave_date: dt.date, reason: str = "", by=None):
+    """Module 6.5 — a worker takes a day off. Approved on creation, always.
+
+    Raises :class:`DuplicateLeave` rather than creating a second row, which is
+    what makes a double-tap on a bad connection safe: the same request twice is
+    the same absence, not two of them.
+    """
+    from .models import LeaveRequest, LeaveStatus
+
+    today = timezone.localdate()
+    if leave_date < today:
+        raise LeaveDateInvalid("Leave cannot be taken for a day that has passed.")
+    if (leave_date - today).days > MAX_LEAVE_LEAD_DAYS:
+        raise LeaveDateInvalid(
+            f"Leave can be requested up to {MAX_LEAVE_LEAD_DAYS} days ahead. "
+            "For anything longer, talk to the household directly."
+        )
+    if not engagement.occurs_on(leave_date):
+        raise LeaveDateInvalid(
+            "This engagement does not call for a visit on that day, so there is "
+            "nothing to take leave from."
+        )
+
+    existing = LeaveRequest.objects.filter(
+        engagement=engagement, leave_date=leave_date
+    ).first()
+    if existing is not None:
+        if existing.status == LeaveStatus.WITHDRAWN:
+            # A withdrawn day may be taken again — the worker changed their mind
+            # twice, which is allowed and is not worth a new row.
+            existing.status = LeaveStatus.APPROVED
+            existing.reason = reason[:200]
+            existing.resident_responded_at = None
+            existing.save(
+                update_fields=["status", "reason", "resident_responded_at", "updated_at"]
+            )
+            leave = existing
+        else:
+            raise DuplicateLeave("Leave is already recorded for that day.")
+    else:
+        leave = LeaveRequest.objects.create(
+            society=engagement.society,
+            engagement=engagement,
+            worker=engagement.worker,
+            leave_date=leave_date,
+            reason=reason[:200],
+        )
+
+    worker_name = engagement.worker.user.get_full_name()
+    _notify_leave(
+        engagement.resident.user,
+        title=f"{worker_name} cannot come on {leave_date:%d %b}",
+        body=(
+            f"{reason.strip() or 'They have asked for the day off.'} "
+            "Tap to say whether you need someone else that day."
+        ),
+        leave=leave,
+    )
+    logger.info(
+        "Leave requested: engagement=%s worker=%s date=%s",
+        engagement.pk, engagement.worker_id, leave_date,
+    )
+    return leave
+
+
+@transaction.atomic
+def respond_to_leave(leave, *, needs_replacement: bool, by=None):
+    """The household's answer: do you need somebody else that day?
+
+    Idempotent for the same answer, so a retried tap does not reopen a settled
+    day. Changing the answer is allowed while nobody has been assigned.
+    """
+    from .models import LeaveStatus
+
+    if leave.status in {LeaveStatus.REPLACEMENT_CONFIRMED, LeaveStatus.WITHDRAWN}:
+        raise LeaveNotActionable(
+            "This day has already been settled and cannot be changed."
+        )
+
+    leave.status = (
+        LeaveStatus.REPLACEMENT_REQUESTED if needs_replacement else LeaveStatus.WAIVED
+    )
+    leave.resident_responded_at = timezone.now()
+    leave.save(update_fields=["status", "resident_responded_at", "updated_at"])
+
+    if not needs_replacement:
+        # Nothing more will happen to this day, so settle it now rather than
+        # leaving a row that looks unfinished forever.
+        settle_leave(leave)
+        _notify_leave(
+            leave.worker.user,
+            title="Your leave is confirmed",
+            body=(
+                f"The household does not need cover on {leave.leave_date:%d %b}. "
+                "Enjoy your day."
+            ),
+            leave=leave,
+        )
+    else:
+        _notify_leave(
+            leave.worker.user,
+            title="Your leave is confirmed",
+            body=(
+                f"The household is arranging cover for {leave.leave_date:%d %b}. "
+                "That day will not be counted as attended."
+            ),
+            leave=leave,
+        )
+
+    return leave
+
+
+def replacement_candidates(leave, *, limit: int = 10):
+    """Workers who could cover this visit, best first.
+
+    Reuses Module 4.3's scorer rather than inventing a second notion of "good
+    match" — a worker the platform ranks highly for a hire is the same worker it
+    should suggest for a day of cover. The only additions are the two conditions
+    specific to cover: they must be free at that hour, and they must not be the
+    person who is away.
+    """
+    from apps.hiring.services import rank_workers, searchable_workers
+
+    engagement = leave.engagement
+    pool = searchable_workers(leave.society_id).exclude(pk=leave.worker_id)
+
+    if engagement.service_type_id:
+        # Somebody who cooks is not cover for somebody who cleans.
+        pool = pool.filter(service_types__id=engagement.service_type_id)
+
+    pool = list(pool.distinct()[: max(limit * 4, 40)])
+    if not pool:
+        return []
+
+    busy = conflicted_worker_ids(
+        [w.pk for w in pool],
+        on_date=leave.leave_date,
+        start_minutes=minutes_of(engagement.start_time),
+        duration_minutes=engagement.expected_duration_minutes,
+    )
+    free = [w for w in pool if w.pk not in busy]
+    if not free:
+        return []
+
+    ranked = rank_workers(free, resident_society=engagement.society)
+    return ranked[:limit]
+
+
+@transaction.atomic
+def assign_replacement(leave, replacement, *, by=None):
+    """Confirm who is covering, and settle the money in the same transaction.
+
+    Settling here rather than on the day is deliberate: the replacement agreed to
+    work on the strength of a stated amount, and that amount should not be able
+    to move afterwards because the month's rate was recalculated.
+    """
+    from .models import LeaveStatus
+
+    if leave.status not in {LeaveStatus.APPROVED, LeaveStatus.REPLACEMENT_REQUESTED}:
+        raise LeaveNotActionable(
+            "A replacement can only be assigned while cover is still being sought."
+        )
+    if replacement.pk == leave.worker_id:
+        raise LeaveNotActionable("A worker cannot cover their own absence.")
+    if replacement.user.society_id != leave.society_id:
+        raise LeaveNotActionable("A replacement must belong to the same society.")
+
+    busy = conflicted_worker_ids(
+        [replacement.pk],
+        on_date=leave.leave_date,
+        start_minutes=minutes_of(leave.engagement.start_time),
+        duration_minutes=leave.engagement.expected_duration_minutes,
+    )
+    if busy:
+        raise LeaveNotActionable(
+            f"{replacement.user.get_full_name()} is already booked at that time."
+        )
+
+    leave.replacement = replacement
+    leave.status = LeaveStatus.REPLACEMENT_CONFIRMED
+    leave.replacement_confirmed_at = timezone.now()
+    leave.save(
+        update_fields=[
+            "replacement", "status", "replacement_confirmed_at", "updated_at",
+        ]
+    )
+
+    settle_leave(leave)
+
+    _notify_leave(
+        replacement.user,
+        title=f"You are covering a visit on {leave.leave_date:%d %b}",
+        body=(
+            f"{leave.engagement.resident.flat} at "
+            f"{leave.engagement.start_time:%H:%M}. "
+            f"You will be paid {format_paise(leave.replacement_paise)}."
+        ),
+        leave=leave,
+    )
+    _notify_leave(
+        leave.engagement.resident.user,
+        title="Cover arranged",
+        body=(
+            f"{replacement.user.get_full_name()} will come on "
+            f"{leave.leave_date:%d %b}."
+        ),
+        leave=leave,
+    )
+    _notify_leave(
+        leave.worker.user,
+        title="Cover arranged for your leave",
+        body=(
+            f"{replacement.user.get_full_name()} is covering "
+            f"{leave.leave_date:%d %b}."
+        ),
+        leave=leave,
+    )
+    return leave
+
+
+@transaction.atomic
+def withdraw_leave(leave, *, by=None):
+    """The worker can come after all.
+
+    Refused once a replacement is confirmed: somebody else has rearranged their
+    day around it, and cancelling them by surprise is the same harm this module
+    exists to prevent, pointed the other way.
+    """
+    from .models import LeaveStatus
+
+    if not leave.can_withdraw:
+        raise LeaveNotActionable(
+            "This leave can no longer be withdrawn — cover has already been "
+            "arranged. Please speak to the household."
+        )
+
+    leave.status = LeaveStatus.WITHDRAWN
+    leave.save(update_fields=["status", "updated_at"])
+
+    _notify_leave(
+        leave.engagement.resident.user,
+        title=f"{leave.worker.user.get_full_name()} can come after all",
+        body=f"Their leave for {leave.leave_date:%d %b} has been withdrawn.",
+        leave=leave,
+    )
+    return leave
+
+
+@transaction.atomic
+def settle_leave(leave):
+    """Work out and record the money for one day of leave. Idempotent.
+
+    ---------------------------------------------------------------------------
+    WHY THERE IS NO DEDUCTION HERE
+    ---------------------------------------------------------------------------
+    The obvious implementation subtracts a day's pay from the absent worker's
+    salary. It would be wrong, and wrong in the direction that costs a worker
+    money: ``payments.services.salary_basis`` already pro-rates the month by
+    *attended* visits taken from the gate log. A day not worked is already a day
+    not paid. Deducting again here would dock the same absence twice.
+
+    So this records the **transfer** — what the replacement is owed, which is
+    exactly what the original worker forgoes — and freezes the arithmetic that
+    produced it. The default rule sends the whole day to whoever worked it, and
+    the two halves then net out exactly against the attendance pro-rating.
+
+    Where an engagement carries a ``ReplacementSplit`` below 100%, the original
+    worker is meant to keep a share of a day they did not work. Attendance
+    pro-rating cannot express that, so ``forgone_paise`` records the difference
+    for the receipt and a person applies it. That seam is deliberate and narrow;
+    silently paying the wrong number would not be.
+    """
+    from apps.payments.models import PaymentKind
+    from apps.payments.services import create_payment, daily_rate_paise, split_for_replacement
+
+    from .models import SETTLEABLE_LEAVE_STATUSES, LeaveStatus
+
+    if leave.is_settled or leave.status not in SETTLEABLE_LEAVE_STATUSES:
+        return leave
+
+    rate = daily_rate_paise(leave.engagement)
+    to_replacement = 0
+    forgone = rate
+
+    if leave.status == LeaveStatus.REPLACEMENT_CONFIRMED and leave.replacement_id:
+        to_replacement, retained = split_for_replacement(
+            leave.engagement, day_rate_paise=rate
+        )
+        forgone = rate - retained
+
+        if to_replacement > 0:
+            create_payment(
+                resident=leave.engagement.resident,
+                worker=leave.replacement,
+                society=leave.society,
+                kind=PaymentKind.REPLACEMENT,
+                amount_paise=to_replacement,
+                engagement=leave.engagement,
+                note=(
+                    f"Covering {leave.worker.user.get_full_name()} on "
+                    f"{leave.leave_date:%d %b %Y}"
+                ),
+            )
+
+    leave.day_rate_paise = rate
+    leave.forgone_paise = forgone
+    leave.replacement_paise = to_replacement
+    leave.settled_at = timezone.now()
+    leave.save(
+        update_fields=[
+            "day_rate_paise", "forgone_paise", "replacement_paise",
+            "settled_at", "updated_at",
+        ]
+    )
+    logger.info(
+        "Leave %s settled: day_rate=%s to_replacement=%s status=%s",
+        leave.pk, rate, to_replacement, leave.status,
+    )
+    return leave
+
+
+def close_lapsed_leave(*, today: dt.date | None = None) -> int:
+    """Mark unanswered cover requests as unfilled once the day has passed.
+
+    There is no scheduler on the free tier (docs/free-tier-constraints.md §7),
+    so this is idempotent and cheap enough to call from a read path — the leave
+    list view does exactly that. Returns how many were closed.
+    """
+    from .models import LeaveRequest, LeaveStatus
+
+    today = today or timezone.localdate()
+    lapsed = LeaveRequest.objects.filter(
+        status__in=[LeaveStatus.APPROVED, LeaveStatus.REPLACEMENT_REQUESTED],
+        leave_date__lt=today,
+    )
+
+    closed = 0
+    for leave in lapsed:
+        leave.status = LeaveStatus.UNFILLED
+        leave.save(update_fields=["status", "updated_at"])
+        settle_leave(leave)
+        closed += 1
+
+    if closed:
+        logger.info("Closed %s lapsed leave request(s) as unfilled", closed)
+    return closed
+
+
 __all__ = [
+    "MAX_LEAVE_LEAD_DAYS",
     "REMINDER_HORIZON_DAYS",
     "ConflictReport",
+    "DuplicateLeave",
+    "LeaveDateInvalid",
+    "LeaveError",
+    "LeaveNotActionable",
+    "assign_replacement",
     "check_conflict",
+    "close_lapsed_leave",
     "conflicted_worker_ids",
     "due_reminders",
     "effective_timing",
     "ensure_reminders_for_worker",
+    "replacement_candidates",
+    "request_leave",
+    "respond_to_leave",
+    "settle_leave",
+    "withdraw_leave",
 ]

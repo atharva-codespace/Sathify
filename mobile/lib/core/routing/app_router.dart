@@ -40,6 +40,8 @@ import '../../features/hiring/presentation/screens/worker_detail_screen.dart';
 import '../../features/hiring/presentation/screens/worker_search_screen.dart';
 import '../../features/notifications/presentation/screens/notification_center_screen.dart';
 import '../../features/notifications/presentation/screens/notification_preferences_screen.dart';
+import '../../features/scheduling/presentation/screens/apply_leave_screen.dart';
+import '../../features/scheduling/presentation/screens/leave_response_screen.dart';
 import '../../features/scheduling/presentation/screens/my_schedule_screen.dart';
 import '../../features/societies/presentation/screens/claim_flat_screen.dart';
 import '../../features/societies/presentation/screens/resident_approval_queue_screen.dart';
@@ -104,6 +106,15 @@ class Routes {
 
   /// Module 6.1 — recurring visits and one-day jobs in one schedule.
   static const String mySchedule = '/schedule';
+
+  /// Module 6.5 — urgent leave ("chutti"). The worker takes a day off at
+  /// `/schedule/leave/new`; the household answers at `/schedule/leave/<id>`.
+  /// Both sit under `/schedule` so the leave screens inherit its place in the
+  /// navigation rather than becoming a fifth top-level destination.
+  static const String applyLeave = '/schedule/leave/new';
+  static const String leaveDetail = '/schedule/leave/:leaveId';
+
+  static String leaveDetailPath(int leaveId) => '/schedule/leave/$leaveId';
 
   /// Module 7 — the gate. The scanner is the guard's home.
   static const String gateScanner = '/gate';
@@ -372,6 +383,20 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: Routes.mySchedule,
             builder: (_, __) => const MyScheduleScreen(),
           ),
+          // Declared before `/schedule/leave/:leaveId` so "new" is matched as a
+          // literal rather than swallowed as an id, exactly as `/complaints/new`
+          // is above.
+          GoRoute(
+            path: Routes.applyLeave,
+            builder: (_, __) => const ApplyLeaveScreen(),
+          ),
+          GoRoute(
+            path: Routes.leaveDetail,
+            builder: (_, goState) => LeaveResponseScreen(
+              leaveId:
+                  int.tryParse(goState.pathParameters['leaveId'] ?? '') ?? 0,
+            ),
+          ),
 
           // A worker's home is their schedule. Module 6.1 exists precisely so they
           // see one merged day rather than checking recurring work and one-day
@@ -524,6 +549,22 @@ final routerProvider = Provider<GoRouter>((ref) {
         ],
       ),
     ],
+    // A location that matches nothing must never be a crash.
+    //
+    // Most navigation in this app is typed — `Routes.something` — and cannot be
+    // wrong. Notification routes are not: they are strings chosen by the server
+    // and stored on the notification row, so a backend that emits a path this
+    // build does not know (or an old row written before a route was renamed)
+    // arrives here. Tapping it used to throw GoException and take the screen
+    // down, which is a spectacular way to fail at "you have a new complaint".
+    //
+    // `errorBuilder` rather than `onException`, for two reasons. go_router
+    // asserts that only *one* of them may be set, and this one pushes a page
+    // instead of navigating: an `onException` that called `go()` would reset the
+    // stack, so a bad notification tapped mid-task would also throw away
+    // whatever the person was in the middle of doing.
+    errorBuilder: (context, goState) =>
+        RouteNotFoundScreen(location: goState.uri.toString()),
   );
 });
 
@@ -623,6 +664,53 @@ class _SplashScreen extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown when a location matches no route.
+///
+/// Deliberately blameless. The only way an ordinary user reaches this is a
+/// notification pointing somewhere this build of the app does not have, which
+/// is the platform's mistake and not theirs, so it offers a way onwards rather
+/// than an error code.
+class RouteNotFoundScreen extends StatelessWidget {
+  const RouteNotFoundScreen({super.key, required this.location});
+
+  final String location;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Not available')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.explore_off_outlined, size: 48),
+              const SizedBox(height: AppSpacing.md),
+              Text(
+                'We could not open that',
+                style: Theme.of(context).textTheme.titleMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                'This link may need a newer version of the app.',
+                style: Theme.of(context).textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: AppSpacing.xl),
+              FilledButton(
+                onPressed: () => context.go(Routes.notifications),
+                child: const Text('Go to notifications'),
+              ),
+            ],
+          ),
         ),
       ),
     );
