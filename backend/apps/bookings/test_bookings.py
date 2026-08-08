@@ -257,26 +257,62 @@ class TestMatching:
         )
         assert response.data["results"][0]["match_percentage"] is not None
 
-    def test_a_worker_who_never_opted_in_is_not_matched(
+    def test_a_worker_who_never_opted_in_is_still_matched(
         self, authenticated_client, resident, resident_user,
         worker, cleaning_category, booking_date,
     ):
-        """Silence is not consent — the spec matches on an explicit opt-in."""
+        """A worker who never blocked the date is bookable on it.
+
+        The regression this pins: requiring an explicit per-date opt-in row
+        made every category except the ``bypasses_notice_period`` one return
+        an empty list, because almost nobody sets those rows.
+        """
         response = authenticated_client(resident_user).get(
             reverse(self.URL), self.params(cleaning_category, booking_date)
         )
-        assert response.data["results"] == []
+        assert [row["id"] for row in response.data["results"]] == [worker.pk]
 
     def test_an_emergency_category_matches_a_worker_who_never_opted_in(
         self, authenticated_client, resident, resident_user,
         worker, emergency_category, booking_date,
     ):
-        """The exception: nobody pre-declares availability for an emergency
-        that has not happened yet, so silence is read as "yes" here instead."""
+        """The emergency category behaves the same as every other one now."""
         response = authenticated_client(resident_user).get(
             reverse(self.URL), self.params(emergency_category, booking_date)
         )
         assert [row["id"] for row in response.data["results"]] == [worker.pk]
+
+    @pytest.mark.parametrize(
+        "slug", ["deep-cleaning", "event-preparation", "temporary-cooking"]
+    )
+    def test_every_ordinary_category_can_match(
+        self, authenticated_client, resident, resident_user,
+        worker, booking_date, slug,
+    ):
+        """Bug 1, stated in the terms it was reported in: it was not one
+        category misbehaving, it was every category *but* the urgent one."""
+        category = ServiceCategory.objects.get(slug=slug)
+
+        response = authenticated_client(resident_user).get(
+            reverse(self.URL), self.params(category, booking_date)
+        )
+
+        assert response.data["count"] == 1
+        assert [row["id"] for row in response.data["results"]] == [worker.pk]
+
+    def test_a_worker_who_blocked_the_date_is_not_matched(
+        self, authenticated_client, resident, resident_user,
+        worker, cleaning_category, booking_date,
+    ):
+        """The override still works in the direction that matters."""
+        DayAvailability.objects.create(
+            worker=worker, date=booking_date, is_available=False
+        )
+
+        response = authenticated_client(resident_user).get(
+            reverse(self.URL), self.params(cleaning_category, booking_date)
+        )
+        assert response.data["results"] == []
 
     def test_an_emergency_category_still_excludes_an_explicit_no(
         self, authenticated_client, resident, resident_user,
@@ -551,10 +587,30 @@ class TestCreateBooking:
         )
         assert response.status_code == 403
 
-    def test_booking_a_worker_who_did_not_opt_in_is_refused(
+    def test_booking_a_worker_who_did_not_opt_in_is_allowed(
         self, authenticated_client, resident, resident_user,
         worker, cleaning_category, booking_date,
     ):
+        """The other half of bug 1. Creation enforces the same availability
+        rule as matching, so relaxing one without the other would list a
+        worker and then refuse the booking the resident makes from that list.
+        """
+        response = authenticated_client(resident_user).post(
+            reverse(self.URL),
+            booking_payload(worker, cleaning_category, booking_date),
+            format="json",
+        )
+
+        assert response.status_code == 201
+
+    def test_booking_a_worker_who_blocked_the_date_is_refused(
+        self, authenticated_client, resident, resident_user,
+        worker, cleaning_category, booking_date,
+    ):
+        DayAvailability.objects.create(
+            worker=worker, date=booking_date, is_available=False
+        )
+
         response = authenticated_client(resident_user).post(
             reverse(self.URL),
             booking_payload(worker, cleaning_category, booking_date),

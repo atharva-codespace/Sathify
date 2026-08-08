@@ -99,35 +99,43 @@ def candidate_workers(
     """Workers who could in principle take this category on this date.
 
     Approved and searchable (Module 4's rule), qualified for the category's
-    service type, and — ordinarily — carrying an explicit opt-in row for the
-    date. The opt-in is required rather than assumed: the modspec matches
-    against workers who have *marked themselves* available for that day, and
-    treating silence as a yes would send requests to workers who never said
-    they were free.
+    service type, and not blocked out for the date.
 
-    ``bypasses_notice_period`` categories (emergency assistance) are the one
-    exception, and it is deliberately the *same* flag as the notice-period
-    exemption rather than a second one: both exist for the identical reason.
-    Nobody pre-declares availability for an emergency that has not happened
-    yet, so requiring the same advance opt-in as an ordinary booking would
-    leave the category permanently empty — exempting the notice period while
-    still requiring a day's advance opt-in would not actually make same-day
-    emergency help findable. An explicit "not available" for the day is still
-    honoured either way; only *silence* stops being read as "no".
+    ---------------------------------------------------------------------
+    WHY A MISSING DAY ROW MEANS "YES", FOR EVERY CATEGORY
+    ---------------------------------------------------------------------
+    This used to require an explicit ``DayAvailability`` opt-in row for every
+    category except ``bypasses_notice_period`` ones, on the reading that
+    "silence is not consent". In practice that made four of the five seeded
+    categories permanently unmatchable: setting the opt-in is a per-date
+    toggle buried behind the overflow menu on the worker's schedule, so
+    almost no rows exist, and a resident booking deep cleaning or event
+    preparation got "nobody is free" while emergency assistance — the one
+    seeded category carrying the exemption — found the very same workers.
+    A filter that only ever passes when a rarely-used screen has been visited
+    is not a consent check, it is an outage.
+
+    So the default is inverted: a worker who is approved, carries a photo and
+    has *globally* marked themselves available (``WorkerProfile.is_available``,
+    enforced by ``searchable_workers``) is bookable on any date they have not
+    blocked. That global flag is the real, maintained statement of "I am
+    working"; the per-date row is now purely an **override** on top of it,
+    which is what the model's own docstring already says it "also expresses".
+
+    An explicit ``is_available=False`` row still blocks the date, and a
+    narrower declared window is still honoured — see
+    :func:`_covers_requested_slot`. Only the *absence* of a row changed
+    meaning, and it now means the same thing for every category, so there is
+    no longer a per-category branch here.
     """
     queryset = searchable_workers(society_id)
 
     if category.service_type_id:
         queryset = queryset.filter(service_types=category.service_type_id)
 
-    if category.bypasses_notice_period:
-        queryset = queryset.exclude(
-            day_availability__date=on_date, day_availability__is_available=False
-        )
-    else:
-        queryset = queryset.filter(
-            day_availability__date=on_date, day_availability__is_available=True
-        )
+    queryset = queryset.exclude(
+        day_availability__date=on_date, day_availability__is_available=False
+    )
 
     return (
         annotate_hiring_stats(queryset)
@@ -145,21 +153,17 @@ def candidate_workers(
     )
 
 
-def _covers_requested_slot(
-    rows, start_time: dt.time, duration_minutes: int, *, silence_means_covered: bool
-) -> bool:
+def _covers_requested_slot(rows, start_time: dt.time, duration_minutes: int) -> bool:
     """Whether a worker's declared day-availability window covers this slot.
 
-    A row that exists is always the authority — an explicit narrower window
-    (or an explicit "not available", already filtered out upstream) is
-    honoured regardless of category. It is only the *absence* of a row that
-    means something different depending on why the worker was a candidate at
-    all: an ordinary booking would not have included them without one, so
-    this only runs for an emergency category, where no row is exactly the
-    silence that candidate_workers() already chose to read as "yes".
+    A row that exists is the authority — an explicit narrower window (or an
+    explicit "not available", already filtered out upstream) is honoured. No
+    row at all is the silence that :func:`candidate_workers` reads as "yes",
+    so it covers anything; the worker's usual hours still influence *ranking*
+    through Module 4.3's availability component, they just do not exclude.
     """
     if not rows:
-        return silence_means_covered
+        return True
     return any(row.covers(start_time, duration_minutes) for row in rows)
 
 
@@ -184,18 +188,14 @@ def match_workers(
     end_minutes = start_minutes + duration_minutes
 
     # Honour a narrower window the worker declared for this specific day. A
-    # worker with no row at all said nothing either way — candidate_workers()
-    # already decided what that silence means (excluded, ordinarily; included,
-    # for an emergency category), so a bare "no row" must not be re-filtered
-    # out here, or the emergency exemption above would be undone right back.
+    # worker with no row at all said nothing either way, which
+    # candidate_workers() reads as "yes" — so a bare "no row" must not be
+    # re-filtered out here, or that default would be undone right back.
     covered = [
         worker
         for worker in candidates
         if _covers_requested_slot(
-            getattr(worker, "requested_day_rows", []),
-            start_time,
-            duration_minutes,
-            silence_means_covered=category.bypasses_notice_period,
+            getattr(worker, "requested_day_rows", []), start_time, duration_minutes
         )
     ]
 
@@ -276,12 +276,17 @@ def create_booking(
     if not notice.allowed:
         raise NoticeTooShort(notice.reason)
 
+    # Mirrors candidate_workers()/_covers_requested_slot() exactly. It has to:
+    # this is the second half of the same rule, and if the two disagree the
+    # resident is shown a worker by the match endpoint and then refused when
+    # they tap Book. No row means the worker never blocked the date, which is
+    # bookable; a row is honoured, including a narrower declared window.
     day_row = DayAvailability.objects.filter(
         worker=locked_worker, date=scheduled_date
     ).first()
-    if day_row is None or not day_row.covers(start_time, duration_minutes):
+    if day_row is not None and not day_row.covers(start_time, duration_minutes):
         raise WorkerUnavailable(
-            "This worker has not marked themselves available for that date and time."
+            "This worker is not available for that date and time."
         )
 
     if conflicted_worker_ids(
@@ -448,6 +453,13 @@ def complete_booking(booking: Booking) -> Booking:
         completed_engagements=F("completed_engagements") + 1
     )
 
+    # Completion is the moment the job becomes payable — Module 8 refuses to
+    # open a payment before this status is reached (payments.views
+    # .CreateBookingPaymentView). Nothing was telling the resident that, so the
+    # money waited until they happened to reopen the booking screen. The worker
+    # has finished and is standing there; this is exactly when to ask.
+    _prompt_for_payment(locked)
+
     # Module 9 builds a "jobs you can still rate" list, but nothing was telling
     # anyone it existed — a rating that nobody is prompted for is a rating
     # nobody leaves, and the trust score every other module ranks on starves.
@@ -456,6 +468,44 @@ def complete_booking(booking: Booking) -> Booking:
 
     logger.info("Booking %s marked complete", locked.pk)
     return locked
+
+
+def _prompt_for_payment(booking: Booking) -> None:
+    """Ask the resident to settle a finished job (Module 10, PAYMENT).
+
+    Only the resident: the worker is owed the money, not asked for it. Skipped
+    when a live payment already exists, so re-completing an already-paid job
+    does not nag somebody who has already paid.
+
+    Lazily imported and non-raising, like every other Module 10 call on a write
+    path — a push failure must not roll back a completed booking.
+    """
+    from apps.notifications.models import NotificationCategory
+    from apps.notifications.services import notify
+    from apps.payments.models import Payment, PaymentKind, PaymentStatus
+
+    already_paying = (
+        Payment.objects.filter(booking=booking, kind=PaymentKind.BOOKING)
+        .exclude(status__in=[PaymentStatus.FAILED, PaymentStatus.CANCELLED])
+        .exists()
+    )
+    if already_paying:
+        return
+
+    notify(
+        recipient=booking.resident.user,
+        category=NotificationCategory.PAYMENT,
+        title=f"Pay ₹{booking.quoted_price} for {booking.category.name}",
+        body=(
+            f"{booking.worker.user.get_full_name()} has marked the job complete. "
+            "Tap to pay."
+        ),
+        # "/bookings" rather than "/payments": the Pay button lives on the
+        # booking card, and a payment that does not exist yet has no row on the
+        # payments screen to tap.
+        data={"route": "/bookings", "booking": booking.pk},
+        society=booking.society,
+    )
 
 
 def _prompt_for_rating(booking: Booking) -> None:

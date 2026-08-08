@@ -83,6 +83,62 @@ def _avatar(label: str, colour: tuple[int, int, int]) -> ContentFile:
     return ContentFile(buffer.getvalue(), name=f"{label}.jpg")
 
 
+def _document(label: str, title: str, lines: list[str]) -> ContentFile:
+    """A deterministic placeholder scan, card-shaped.
+
+    Stands in for an Aadhaar card or a rent agreement. Deliberately *not* a real
+    document and deliberately not OCR-able into a valid Aadhaar number: the
+    seeded KYC record is marked verified directly (see ``_kyc_documents``)
+    rather than by running the pipeline over a forgery.
+    """
+    image = Image.new("RGB", (1012, 638), (250, 249, 246))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 1011, 96), fill=(196, 42, 42))
+    draw.text((32, 40), title, fill=(255, 255, 255))
+    draw.rectangle((32, 140, 260, 420), fill=(220, 220, 220), outline=(120, 120, 120))
+    for i, line in enumerate(lines):
+        draw.text((300, 160 + i * 40), line, fill=(30, 30, 30))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=88)
+    return ContentFile(buffer.getvalue(), name=f"{label}.jpg")
+
+
+def _has_stored_file(field) -> bool:
+    """Whether a FileField both names a file *and* that file is really there.
+
+    ``if not profile.photo`` only asks the database, and the database is the
+    half that survives a storage change. Seed once onto the local disk, point
+    ``STORAGES`` at Supabase, and every profile still claims a photo while the
+    bucket is empty — so the seeder skips the upload, the app renders a broken
+    image, and the gate has no reference face to compare against.
+
+    A missing-file check costs one HEAD request per account and makes the
+    command safe to re-run after exactly that migration.
+    """
+    if not field:
+        return False
+    try:
+        return field.storage.exists(field.name)
+    except Exception:  # noqa: BLE001 — an unreachable backend is "not there"
+        return False
+
+
+def _aadhaar_hash(digits: str) -> str:
+    """The same keyed digest the KYC pipeline stores, so de-duplication works.
+
+    Imported lazily and fallen back on: the helper is the pipeline's business,
+    and a rename there should not stop the seeder producing a usable account.
+    """
+    try:
+        from apps.workers.models import hash_aadhaar
+
+        return hash_aadhaar(digits)
+    except Exception:  # noqa: BLE001 — a seeder must not depend on OCR internals
+        import hashlib
+
+        return hashlib.sha256(digits.encode()).hexdigest()
+
+
 class Command(BaseCommand):
     help = "Seed a demo society with one account per role, ready to log in."
 
@@ -110,6 +166,10 @@ class Command(BaseCommand):
         users = self._users(society)
         self._resident_profiles(users, flats)
         self._worker_profiles(users, types, admin=users["9800000001"])
+        # Documents come after the profiles they hang off, and are what turns
+        # an approved account into a *verified* one.
+        self._resident_proofs(users)
+        self._kyc_documents(users)
         self._adopt_orphan_admins(society)
 
         self._report(society, towers, flats)
@@ -251,10 +311,127 @@ class Command(BaseCommand):
                 },
             )
             profile.service_types.set([types[s] for s in type_slugs])
-            if not profile.photo:
+            if not _has_stored_file(profile.photo):
                 profile.photo.save(f"worker_{user.id}.jpg", _avatar(f"worker_{user.id}", colour), save=True)
             self.stdout.write(
                 f"  worker  : {phone} types={type_slugs} searchable={profile.is_searchable}"
+            )
+
+    def _resident_proofs(self, users):
+        """Attach the proof of residence an administrator approves against.
+
+        Module 2.3's claim screen now requires one, so a seeded resident
+        without a document is a resident who could not have been created
+        through the app.
+        """
+        for phone in ("9800000002", "9800000006"):
+            resident = Resident.objects.filter(user=users[phone]).first()
+            if resident is None or _has_stored_file(resident.proof_document):
+                continue
+            user = users[phone]
+            resident.proof_document.save(
+                f"proof_{user.id}.jpg",
+                _document(
+                    f"proof_{user.id}",
+                    "RENT AGREEMENT",
+                    [
+                        f"Name   : {user.get_full_name()}",
+                        f"Flat   : {resident.flat}",
+                        "Type   : Rent agreement",
+                        "Issued : Demo data — not a real document",
+                    ],
+                ),
+                save=True,
+            )
+            self.stdout.write(f"  proof   : {phone} -> {resident.proof_document.name}")
+
+    def _kyc_documents(self, users):
+        """Give each worker a completed, non-minor KYC record (Modules 3.2–3.6).
+
+        The record is written in its *finished* state rather than by running
+        ``process_kyc_document`` over the placeholder above. Two reasons: the
+        placeholder carries no readable Aadhaar number, so the pipeline would
+        correctly mark it FAILED; and the OCR stack is an optional heavy
+        dependency that a seeder must not require.
+
+        Consent is recorded through the real service so the DPDP audit trail
+        looks exactly as it would had the worker tapped the checkbox.
+        """
+        from apps.workers.models import ConsentPurpose, KycDocument, KycStatus
+        from apps.workers.services import record_consent
+
+        # Last four only, as stored. The full number is never persisted, so
+        # these are the digits the pipeline would have kept.
+        spec = [
+            ("9800000003", "4817 9415 3777"[-4:], "1994-03-12", "Female", 31),
+            ("9800000005", "7220 1183 4906"[-4:], "1990-11-02", "Female", 35),
+        ]
+
+        for phone, last4, dob, gender, age in spec:
+            user = users[phone]
+            profile = WorkerProfile.objects.filter(user=user).first()
+            if profile is None:
+                continue
+
+            for purpose in (
+                ConsentPurpose.KYC_AADHAAR,
+                ConsentPurpose.FACE_BIOMETRIC,
+                ConsentPurpose.DATA_PROCESSING,
+            ):
+                record_consent(user, purpose)
+
+            kyc = KycDocument.objects.filter(worker=profile).first()
+            if kyc is None or not _has_stored_file(kyc.document_image):
+                kyc = kyc or KycDocument(worker=profile)
+                kyc.document_image.save(
+                    f"aadhaar_{user.id}.jpg",
+                    _document(
+                        f"aadhaar_{user.id}",
+                        "AADHAAR — DEMO",
+                        [
+                            f"Name   : {user.get_full_name()}",
+                            f"DOB    : {dob}",
+                            f"Gender : {gender}",
+                            f"Number : XXXX XXXX {last4}",
+                        ],
+                    ),
+                    save=False,
+                )
+
+            kyc.status = KycStatus.COMPLETED
+            kyc.extracted_name = user.get_full_name()
+            kyc.extracted_dob = dob
+            kyc.extracted_gender = gender
+            kyc.extracted_age = age
+            kyc.is_minor = False
+            kyc.aadhaar_last4 = last4
+            kyc.aadhaar_hash = _aadhaar_hash(f"{user.id:012d}")
+            kyc.aadhaar_checksum_valid = True
+            kyc.ocr_engine = "seed"
+            kyc.mean_confidence = 0.97
+            kyc.low_confidence_fields = []
+            kyc.cross_check = {}
+            kyc.has_mismatch = False
+            kyc.processed_at = timezone.now()
+            kyc.save()
+
+            # Module 3.5's police-verification badge, so the worker reads as
+            # fully cleared rather than merely approved.
+            today = timezone.localdate()
+            profile.police_verified_at = today
+            profile.police_verified_until = today.replace(year=today.year + 1)
+            profile.police_verification_reference = f"DEMO-PVC-{user.id:05d}"
+            profile.save(
+                update_fields=[
+                    "police_verified_at",
+                    "police_verified_until",
+                    "police_verification_reference",
+                ]
+            )
+
+            self.stdout.write(
+                f"  kyc     : {phone} status={kyc.status} "
+                f"aadhaar=XXXX-{last4} police_verified={profile.is_police_verified}"
             )
 
     def _adopt_orphan_admins(self, society):

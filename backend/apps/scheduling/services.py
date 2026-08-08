@@ -31,14 +31,14 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from apps.bookings.models import Booking, combine_local, minutes_of, windows_overlap
 from apps.hiring.models import Engagement, weekday_of
 from apps.payments.models import format_paise
 
-from .models import Reminder, ReminderKind, ReminderStatus, TaskTiming
+from .models import LeaveRequest, Reminder, ReminderKind, ReminderStatus, TaskTiming
 from .schedule import ScheduleItem, worker_day
 
 logger = logging.getLogger(__name__)
@@ -63,18 +63,48 @@ def conflicted_worker_ids(
 ) -> set:
     """Which of ``worker_ids`` are already committed over the requested window.
 
-    Two sources of conflict, both of which must be honoured or the platform
+    Four sources of conflict, all of which must be honoured or the platform
     will cheerfully double-book someone:
 
-    * another live booking that day, and
-    * an active engagement whose recurring visit falls on that weekday.
+    * another live booking that day,
+    * an active engagement whose recurring visit falls on that weekday,
+    * a day the worker has taken off (Module 6.5), and
+    * a visit the worker has agreed to *cover* for somebody else that day.
 
-    Batched into two queries no matter how large the pool is.
+    ---------------------------------------------------------------------
+    WHY LEAVE IS HERE AND NOT ONLY ON THE CALENDAR
+    ---------------------------------------------------------------------
+    Leave used to be invisible to this function, which is the one place every
+    module asks "is this worker busy". A worker who had taken the day off was
+    therefore still offered to residents searching that date, and could be
+    booked into a day she had already said she could not work.
+
+    It is scoped to **the hours of the visit the leave is about**, not to the
+    whole day. Leave belongs to one engagement — a worker with three
+    households who takes Tuesday off from one of them is still working the
+    other two, and blocking her whole Tuesday would cost her two days' work to
+    record one absence. Both sides of the row are read the same way: the
+    worker who is away, and the worker standing in for her, are each committed
+    only for that visit's window.
+
+    Within the window the leave is deliberately still honoured even though the
+    engagement itself already occupies those hours. The two say different
+    things — the engagement is what was agreed, the leave is the worker's own
+    statement that she cannot work then — and that statement should not depend
+    on a different branch of this function happening to cover it, nor stop
+    holding if the engagement is later paused.
+
+    The absence is per worker, so it removes **only** the worker who is away.
+    Every other worker in the pool is untouched — which is the difference
+    between "Sunita is away that morning" and "nobody is free that day".
+
+    Batched: four queries regardless of pool size.
     """
     worker_ids = list(worker_ids)
     if not worker_ids:
         return set()
 
+    requested = set(worker_ids)
     conflicted: set = set()
 
     bookings = Booking.objects.live().filter(
@@ -107,6 +137,39 @@ def conflicted_worker_ids(
             engagement.expected_duration_minutes,
         ):
             conflicted.add(engagement.worker_id)
+
+    # --- 6.5 leave, and the cover somebody else agreed to work --------------
+    #
+    # One query answers both, because they are the same row seen from the two
+    # ends: the worker who is away, and the worker standing in for them.
+    # ``live()`` excludes withdrawn leave — a worker who changed her mind and
+    # is coming after all is available, and must not stay blocked out.
+    leave_rows = (
+        LeaveRequest.objects.live()
+        .filter(leave_date=on_date)
+        .filter(
+            models.Q(worker_id__in=worker_ids)
+            | models.Q(replacement_id__in=worker_ids)
+        )
+        .select_related("engagement")
+    )
+
+    for leave in leave_rows:
+        # One window governs both sides of the row: the visit that is not
+        # being worked by its usual worker. Outside it, neither of them is
+        # committed by this leave and both stay bookable.
+        if not windows_overlap(
+            start_minutes,
+            duration_minutes,
+            minutes_of(leave.engagement.start_time),
+            leave.engagement.expected_duration_minutes,
+        ):
+            continue
+
+        if leave.worker_id in requested:
+            conflicted.add(leave.worker_id)
+        if leave.replacement_id in requested:
+            conflicted.add(leave.replacement_id)
 
     return conflicted
 
@@ -809,6 +872,14 @@ def mark_task_complete(
             completion.photo = photo
             completion.save(update_fields=["photo", "updated_at"])
 
+        if booking is not None:
+            # A TaskCompletion alone makes the *schedule* say "done" while the
+            # booking sits at CONFIRMED — and Module 8 refuses to open a
+            # payment until the booking itself reads COMPLETED. Marking a job
+            # done therefore has to move both, or the worker finishes, the
+            # household is told, and the money is silently unreachable.
+            _settle_booking_status(booking)
+
         _notify_completion(completion)
         logger.info(
             "Task marked complete: worker=%s date=%s engagement=%s booking=%s",
@@ -817,6 +888,22 @@ def mark_task_complete(
         )
 
     return completion
+
+
+def _settle_booking_status(booking) -> None:
+    """Move a booking to COMPLETED alongside its completion mark.
+
+    An already-completed booking is left alone rather than treated as an error:
+    :func:`mark_task_complete` is idempotent by design, and the two rows can
+    legitimately be settled by two different routes (here, or the resident
+    closing it out from the booking screen).
+    """
+    from apps.bookings.models import BookingStatus
+    from apps.bookings.services import complete_booking
+
+    if booking.status == BookingStatus.COMPLETED:
+        return
+    complete_booking(booking)
 
 
 def _notify_completion(completion) -> None:
