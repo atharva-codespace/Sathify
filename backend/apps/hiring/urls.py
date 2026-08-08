@@ -33,6 +33,17 @@ urlpatterns = [
         name="engagement-detail",
     ),
     path(
+        # --- 4.6 notice period ---
+        "engagements/<int:pk>/notice/",
+        views.GiveNoticeView.as_view(),
+        name="engagement-notice",
+    ),
+    path(
+        "engagements/<int:pk>/notice/withdraw/",
+        views.WithdrawNoticeView.as_view(),
+        name="engagement-notice-withdraw",
+    ),
+    path(
         "engagements/<int:pk>/transition/",
         views.EngagementTransitionView.as_view(),
         name="engagement-transition",

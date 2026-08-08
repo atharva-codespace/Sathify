@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import PropertyMock, patch
 
 import pytest
+from django.db.models.fields.files import FieldFile
 from django.urls import reverse
 from django.utils import timezone
 
@@ -686,6 +688,56 @@ class TestFaceVerification:
 
         assert response.data["result"]["available"] is False
         assert response.data["result"]["verified"] is False
+
+    def test_it_works_when_the_storage_backend_has_no_filesystem_paths(
+        self, authenticated_client, guard_user, worker, tiny_image
+    ):
+        """Production stores media in Supabase, where ``FieldFile.path`` raises.
+
+        This used to reach for ``.path`` directly, so the whole face check
+        turned into a 500 at the gate the moment media left the local disk.
+        Both photos must now be fetched through the storage API instead, and
+        what reaches the engine must be two readable files.
+        """
+        from io import BytesIO
+
+        from django.core.files.base import ContentFile
+        from PIL import Image
+
+        # The fixture's photo is a dangling name; this check actually reads the
+        # bytes, so the worker needs a genuinely stored reference photo.
+        buffer = BytesIO()
+        Image.new("RGB", (2, 2), color="black").save(buffer, format="PNG")
+        worker.photo.save("reference.png", ContentFile(buffer.getvalue()), save=True)
+
+        client = authenticated_client(guard_user)
+        event = self.make_event(client, worker)
+
+        seen = {}
+
+        def spy(live_path, reference_path):
+            seen["live"] = Path(live_path).read_bytes()
+            seen["reference"] = Path(reference_path).read_bytes()
+            return FaceResult(available=True, verified=True, score=0.88)
+
+        # Exactly what S3Storage does: the file saves and reads normally, but
+        # asking a stored file for a filesystem path raises.
+        with (
+            patch.object(
+                FieldFile, "path", new_callable=PropertyMock,
+                side_effect=NotImplementedError,
+            ),
+            patch("apps.attendance.services.verify_face", side_effect=spy),
+        ):
+            response = client.post(
+                self.face_url(event.pk), {"photo": tiny_image}, format="multipart"
+            )
+
+        assert response.status_code == 200
+        assert response.data["result"]["verified"] is True
+        # Copied down from storage, not empty placeholders.
+        assert seen["live"].startswith(b"\x89PNG")
+        assert seen["reference"]
 
     def test_the_score_is_recorded_for_the_audit_trail(
         self, authenticated_client, guard_user, worker, tiny_image

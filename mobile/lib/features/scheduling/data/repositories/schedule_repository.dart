@@ -123,4 +123,78 @@ class ScheduleRepository {
       },
     );
   }
+
+  // --- 6.5 Urgent leave ("chutti") -------------------------------------------
+
+  /// Leave the caller can see: a worker gets their own days off *and* the days
+  /// they agreed to cover; a resident gets their household's.
+  Future<List<LeaveRequest>> fetchLeaveRequests({bool upcomingOnly = false}) async {
+    final response = await _client.get(
+      ApiEndpoints.leaveRequests,
+      query: upcomingOnly ? {'upcoming': '1'} : null,
+    ) as Map<String, dynamic>;
+
+    return ((response['results'] as List?) ?? const [])
+        .map((row) => LeaveRequest.fromJson(row as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Applies for a day off. Approved in the same response — there is no
+  /// pending state and nothing to wait for.
+  Future<LeaveRequest> applyForLeave({
+    required int engagementId,
+    required DateTime leaveDate,
+    String reason = '',
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.leaveRequests,
+      data: {
+        'engagement': engagementId,
+        'leave_date': formatWireDate(leaveDate),
+        if (reason.isNotEmpty) 'reason': reason,
+      },
+    ) as Map<String, dynamic>;
+
+    return LeaveRequest.fromJson(response['leave'] as Map<String, dynamic>);
+  }
+
+  /// The household's answer. Answering "no" settles the day there and then.
+  Future<LeaveRequest> respondToLeave(
+    int leaveId, {
+    required bool needsReplacement,
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.leaveResponse(leaveId),
+      data: {'needs_replacement': needsReplacement},
+    ) as Map<String, dynamic>;
+
+    return LeaveRequest.fromJson(response['leave'] as Map<String, dynamic>);
+  }
+
+  Future<List<ReplacementCandidate>> fetchReplacementCandidates(int leaveId) async {
+    final response = await _client.get(
+      ApiEndpoints.replacementCandidates(leaveId),
+    ) as Map<String, dynamic>;
+
+    return ((response['results'] as List?) ?? const [])
+        .map((row) => ReplacementCandidate.fromJson(row as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Confirms cover. The replacement's pay is settled server-side in the same
+  /// transaction, so the amount they were promised cannot move afterwards.
+  Future<LeaveRequest> assignReplacement(int leaveId, int workerId) async {
+    final response = await _client.post(
+      ApiEndpoints.assignReplacement(leaveId),
+      data: {'replacement': workerId},
+    ) as Map<String, dynamic>;
+
+    return LeaveRequest.fromJson(response['leave'] as Map<String, dynamic>);
+  }
+
+  Future<LeaveRequest> withdrawLeave(int leaveId) async {
+    final response = await _client.post(ApiEndpoints.withdrawLeave(leaveId))
+        as Map<String, dynamic>;
+    return LeaveRequest.fromJson(response['leave'] as Map<String, dynamic>);
+  }
 }

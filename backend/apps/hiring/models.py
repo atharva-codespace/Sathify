@@ -329,9 +329,30 @@ class EngagementEndReason(models.TextChoices):
     ADMIN_ENDED = "admin_ended", _("Ended by an administrator")
 
 
+#: Clear days of notice required to end a standing engagement.
+#:
+#: A constant rather than a settings value or a per-society column: this is a
+#: term of the arrangement both sides agreed to, not a knob to tune per
+#: deployment. If it ever needs to vary, it varies per *engagement* and belongs
+#: in ``RecurringTerms`` where the rest of the agreed terms live.
+NOTICE_PERIOD_DAYS = 10
+
+
 class EngagementQuerySet(models.QuerySet):
     def active(self):
         return self.filter(status=EngagementStatus.ACTIVE)
+
+    def serving_notice(self):
+        """Active engagements with an end date already set."""
+        return self.filter(
+            status=EngagementStatus.ACTIVE, last_working_day__isnull=False
+        )
+
+    def past_notice(self, *, today=None):
+        """Engagements whose last working day has gone by but which are still open."""
+        return self.serving_notice().filter(
+            last_working_day__lt=today or timezone.localdate()
+        )
 
     def live(self):
         """Active or paused — i.e. not finished.
@@ -381,6 +402,31 @@ class Engagement(SocietyScopedModel, RecurringTerms, TimeStampedModel):
     paused_at = models.DateTimeField(null=True, blank=True)
     pause_reason = models.CharField(max_length=200, blank=True)
     resumed_at = models.DateTimeField(null=True, blank=True)
+
+    # --- 4.6 notice period ---------------------------------------------------
+    #
+    # Notice is the *ordinary* way an engagement ends: either side says so, and
+    # the arrangement runs on for ten more days while the household finds
+    # somebody and the worker finds their next household. ``terminate()`` below
+    # remains the exceptional path — abuse, safety, mutual consent — and takes
+    # effect at once, because a worker reporting harassment must not have to keep
+    # turning up for ten days.
+    #
+    # An engagement serving notice stays ACTIVE, deliberately. The schedule
+    # still produces visits, the gate still admits them, and attendance still
+    # counts. Treating a worker who is still working as already gone would
+    # strand them at a gate that no longer recognises them.
+    notice_given_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    notice_given_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="engagement_notices",
+    )
+    #: The last day this engagement calls for a visit. Set when notice is given.
+    last_working_day = models.DateField(null=True, blank=True, db_index=True)
+
     ended_at = models.DateTimeField(null=True, blank=True)
     end_reason = models.CharField(
         max_length=30, choices=EngagementEndReason.choices, blank=True
@@ -448,6 +494,57 @@ class Engagement(SocietyScopedModel, RecurringTerms, TimeStampedModel):
         self.resumed_at = timezone.now()
         self.pause_reason = ""
         self.save(update_fields=["status", "resumed_at", "pause_reason", "updated_at"])
+        return True
+
+    # --- 4.6 notice period ---------------------------------------------------
+
+    @property
+    def is_serving_notice(self) -> bool:
+        return self.last_working_day is not None and self.status == EngagementStatus.ACTIVE
+
+    @property
+    def notice_days_remaining(self) -> int:
+        """Calendar days left, floored at zero. Not working days — the notice
+        period is a warning to the household, and a household counts in days."""
+        if self.last_working_day is None:
+            return 0
+        return max(0, (self.last_working_day - timezone.localdate()).days)
+
+    def visits_remaining(self, *, today=None) -> int:
+        """How many visits are actually left before the last working day.
+
+        The number the worker and the household both care about, and a different
+        number from :attr:`notice_days_remaining`: ten days of notice on a
+        Tuesday-only engagement is one more visit, not ten.
+        """
+        if self.last_working_day is None:
+            return 0
+
+        day = today or timezone.localdate()
+        days = set(self.days_of_week)
+        remaining = 0
+        while day <= self.last_working_day:
+            if day.weekday() in days:
+                remaining += 1
+            day += dt.timedelta(days=1)
+        return remaining
+
+    def finish_notice(self) -> bool:
+        """Close an engagement whose last working day has passed. Idempotent.
+
+        Ends as TERMINATED with the reason notice was given for, rather than
+        inventing a separate "completed" state: Module 8 and Module 9 both read
+        ``status`` and neither should have to learn a fourth value to mean the
+        same thing as the third.
+        """
+        if self.status != EngagementStatus.ACTIVE or self.last_working_day is None:
+            return False
+        if self.last_working_day >= timezone.localdate():
+            return False
+
+        self.status = EngagementStatus.TERMINATED
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "ended_at", "updated_at"])
         return True
 
     def terminate(self, *, reason: str, note: str = "", by=None) -> bool:

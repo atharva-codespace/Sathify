@@ -16,6 +16,9 @@ Endpoint map (mounted at /api/v1/hiring/)::
     GET    engagements/<id>/            one engagement
     POST   engagements/<id>/transition/ pause / resume / terminate          (4.5)
 
+    POST   engagements/<id>/notice/     give ten days' notice               (4.6)
+    POST   engagements/<id>/notice/withdraw/   take it back                 (4.6)
+
 -------------------------------------------------------------------------------
 WHO SEES WHAT
 -------------------------------------------------------------------------------
@@ -59,10 +62,11 @@ from apps.accounts.permissions import (
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
 
-from .models import Engagement, HireRequest, HireRequestStatus
+from .models import NOTICE_PERIOD_DAYS, Engagement, HireRequest, HireRequestStatus
 from .serializers import (
     EngagementSerializer,
     EngagementTransitionSerializer,
+    GiveNoticeSerializer,
     HireRequestCreateSerializer,
     HireRequestRespondSerializer,
     HireRequestSerializer,
@@ -73,13 +77,18 @@ from .serializers import (
 from .services import (
     DuplicateEngagement,
     HiringError,
+    NoticeTooShort,
     RequestNotActionable,
     accept_hire_request,
     annotate_hiring_stats,
     build_scoring_inputs,
+    close_engagements_past_notice,
     decline_hire_request,
+    earliest_last_working_day,
+    give_notice,
     rank_workers,
     searchable_workers,
+    withdraw_notice,
 )
 from .scoring import score
 
@@ -520,6 +529,12 @@ class EngagementListView(generics.ListAPIView):
     queryset = Engagement.objects.none()  # declared for schema generation
 
     def get_queryset(self):
+        # Module 4.6 — engagements whose notice has run out are closed here.
+        # There is no scheduler on the free tier (docs/free-tier-constraints.md
+        # §7), so the sweep is idempotent and hangs off a read, exactly as hire
+        # request expiry and Module 6.5's leave already do.
+        close_engagements_past_notice()
+
         queryset = _engagement_queryset(self.request.user)
 
         status_filter = self.request.query_params.get("status")
@@ -601,4 +616,105 @@ class EngagementTransitionView(APIView):
 
         return Response(
             {"engagement": EngagementSerializer(engagement).data, "message": message}
+        )
+
+
+@extend_schema(
+    tags=["Hiring"],
+    summary="Give notice on an engagement",
+    request=GiveNoticeSerializer,
+    responses=EngagementSerializer,
+)
+class GiveNoticeView(APIView):
+    """Module 4.6 — either side ends the arrangement, with ten days' notice.
+
+    Deliberately not folded into the pause/resume/terminate endpoint. Notice is
+    the ordinary way an engagement ends; terminate is the exceptional one, and
+    giving them the same shape is how the exceptional path gets taken by
+    accident.
+
+    The engagement stays ACTIVE throughout. Its visits keep appearing on both
+    schedules, the gate keeps admitting the worker, and attendance keeps
+    counting - which is what makes "paid in full for the days worked" true
+    rather than merely promised.
+    """
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = GiveNoticeSerializer
+
+    def post(self, request, pk):
+        engagement = _engagement_queryset(request.user).filter(pk=pk).first()
+        if engagement is None:
+            return _error("not_found", "Engagement not found.", status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == Role.RESIDENT:
+            primary_resident_or_403(request.user)
+
+        serializer = GiveNoticeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            engagement = give_notice(
+                engagement,
+                by=request.user,
+                reason=data["reason"],
+                requested_last_day=data.get("last_working_day"),
+            )
+        except NoticeTooShort as exc:
+            return _error(
+                exc.code,
+                str(exc),
+                status.HTTP_400_BAD_REQUEST,
+                details={
+                    "earliest_last_working_day": earliest_last_working_day(),
+                    "notice_period_days": NOTICE_PERIOD_DAYS,
+                },
+            )
+        except HiringError as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+
+        visits = engagement.visits_remaining()
+        return Response(
+            {
+                "engagement": EngagementSerializer(engagement).data,
+                "message": (
+                    f"Notice recorded. The last working day is "
+                    f"{engagement.last_working_day:%d %b %Y} - "
+                    f"{visits} more visit{'s' if visits != 1 else ''}, "
+                    "all of them paid."
+                ),
+            }
+        )
+
+
+@extend_schema(
+    tags=["Hiring"],
+    summary="Withdraw notice",
+    responses=EngagementSerializer,
+)
+class WithdrawNoticeView(APIView):
+    """Both sides changed their mind before the last working day."""
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = EngagementSerializer
+
+    def post(self, request, pk):
+        engagement = _engagement_queryset(request.user).filter(pk=pk).first()
+        if engagement is None:
+            return _error("not_found", "Engagement not found.", status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == Role.RESIDENT:
+            primary_resident_or_403(request.user)
+
+        try:
+            engagement = withdraw_notice(engagement, by=request.user)
+        except HiringError as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+
+        return Response(
+            {
+                "engagement": EngagementSerializer(engagement).data,
+                "message": "Notice withdrawn. This arrangement continues as before.",
+            }
         )

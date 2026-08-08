@@ -111,9 +111,69 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
         'Resumed.',
       );
 
-  /// Terminating is final, so it is confirmed and always carries a reason —
-  /// the server requires one, and it is what the other party will be told.
+  /// Module 4.6 — the ordinary way to end an arrangement.
+  ///
+  /// Ten days' notice, during which nothing changes: the visits still happen,
+  /// the gate still admits the worker, and every one of those days is paid.
+  /// This is the button people should reach for, which is why it is the plain
+  /// one and `_terminate` below is not.
+  Future<void> _giveNotice() async {
+    final reason = await showDialog<EngagementEndReason>(
+      context: context,
+      builder: (_) => _EndReasonDialog(isWorker: widget.isWorker),
+    );
+    if (reason == null) return;
+
+    final lastDay = NoticePeriod.earliestLastDay(DateTime.now());
+    await _run(
+      () => ref
+          .read(hiringRepositoryProvider)
+          .giveNotice(widget.engagement.id, reason: reason),
+      'Notice given. The last working day is ${_formatDate(lastDay)}.',
+    );
+  }
+
+  Future<void> _withdrawNotice() => _run(
+        () => ref
+            .read(hiringRepositoryProvider)
+            .withdrawNotice(widget.engagement.id),
+        'Notice withdrawn. This arrangement continues.',
+      );
+
+  /// The exceptional path — abuse, safety, a mutual decision to stop today.
+  ///
+  /// Kept behind a confirmation *and* visually quieter than notice, because a
+  /// worker who is ended without notice loses ten days of income they were
+  /// entitled to work. That should be a deliberate act, not the nearest button.
   Future<void> _terminate() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('End today, without notice?'),
+        content: Text(
+          widget.isWorker
+              ? 'This ends the arrangement immediately. Giving 10 days\' notice '
+                  'instead means you keep working — and being paid — until then.'
+              : 'This ends the arrangement immediately, and '
+                  '${widget.engagement.workerName} loses the 10 days of work '
+                  'they would otherwise have been paid for. Use notice unless '
+                  'there is a reason not to.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('End today'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
     final reason = await showDialog<EngagementEndReason>(
       context: context,
       builder: (_) => _EndReasonDialog(isWorker: widget.isWorker),
@@ -222,11 +282,52 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
             if (engagement.status == EngagementStatus.terminated &&
                 engagement.endNote.isNotEmpty)
               _DetailRow(icon: Icons.info_outline, text: engagement.endNote),
+            // Module 4.6 — while notice runs, the countdown is the headline.
+            // Both sides are planning around it: the household is looking for
+            // somebody, the worker is counting the days they will be paid for.
+            if (engagement.isServingNotice &&
+                engagement.lastWorkingDay != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: const BoxDecoration(
+                  color: AppColors.warningSoft,
+                  borderRadius: AppRadius.chip,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Finishing on '
+                      '${_formatDate(engagement.lastWorkingDay!)}',
+                      style: theme.textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      NoticePeriod.summary(
+                        visitsRemaining: engagement.visitsRemaining,
+                      ),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ],
             if (engagement.isLive) ...[
               const SizedBox(height: 14),
               if (_isBusy)
                 const Center(child: CircularProgressIndicator())
-              else
+              else if (engagement.isServingNotice)
+                OutlinedButton.icon(
+                  onPressed: _withdrawNotice,
+                  icon: const Icon(Icons.undo_rounded),
+                  label: const Text('Withdraw notice'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                )
+              else ...[
                 Row(
                   children: [
                     Expanded(
@@ -244,17 +345,26 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: _terminate,
-                        icon: const Icon(Icons.stop_circle_outlined),
-                        label: const Text('End'),
+                        onPressed: _giveNotice,
+                        icon: const Icon(Icons.event_available_outlined),
+                        label: const Text('Give notice'),
                         style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.danger,
                           minimumSize: const Size.fromHeight(48),
                         ),
                       ),
                     ),
                   ],
                 ),
+                // Quieter than notice on purpose: ending without notice costs
+                // the worker ten days of income they were entitled to work.
+                TextButton(
+                  onPressed: _terminate,
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.textTertiary,
+                  ),
+                  child: const Text('End today, without notice'),
+                ),
+              ],
             ],
           ],
         ),
@@ -382,4 +492,15 @@ class _EndReasonDialog extends StatelessWidget {
       ],
     );
   }
+}
+
+/// `Tue 18 Aug` — short enough for a chip, unambiguous enough for a date
+/// somebody is planning around.
+String _formatDate(DateTime date) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  return '${days[date.weekday - 1]} ${date.day} ${months[date.month - 1]}';
 }

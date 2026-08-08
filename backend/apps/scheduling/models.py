@@ -144,6 +144,190 @@ class TaskTiming(TimeStampedModel):
         return max(0, actual - expected)
 
 
+class LeaveStatus(models.TextChoices):
+    """Where a leave request has got to.
+
+    There is deliberately no PENDING. See :class:`LeaveRequest`.
+    """
+
+    APPROVED = "approved", _("Approved")
+    WAIVED = "waived", _("Resident needs no replacement")
+    REPLACEMENT_REQUESTED = "replacement_requested", _("Looking for a replacement")
+    REPLACEMENT_CONFIRMED = "replacement_confirmed", _("Replacement confirmed")
+    UNFILLED = "unfilled", _("No replacement found")
+    WITHDRAWN = "withdrawn", _("Withdrawn by the worker")
+
+
+#: Statuses from which the worker may still withdraw. Once a replacement has
+#: been confirmed they may not: somebody else has rearranged their day on the
+#: strength of it, and un-booking them by surprise is the same harm this module
+#: exists to prevent, pointed the other way.
+WITHDRAWABLE_LEAVE_STATUSES = frozenset(
+    {
+        LeaveStatus.APPROVED,
+        LeaveStatus.WAIVED,
+        LeaveStatus.REPLACEMENT_REQUESTED,
+    }
+)
+
+#: Statuses where the day is finished with, one way or another.
+SETTLEABLE_LEAVE_STATUSES = frozenset(
+    {
+        LeaveStatus.WAIVED,
+        LeaveStatus.REPLACEMENT_CONFIRMED,
+        LeaveStatus.UNFILLED,
+    }
+)
+
+
+class LeaveRequestQuerySet(models.QuerySet):
+    def live(self):
+        """Everything that still affects a schedule. Excludes withdrawals."""
+        return self.exclude(status=LeaveStatus.WITHDRAWN)
+
+    def for_dates(self, start: dt.date, end: dt.date):
+        return self.filter(leave_date__gte=start, leave_date__lte=end)
+
+    def awaiting_resident(self):
+        return self.filter(status=LeaveStatus.APPROVED)
+
+
+class LeaveRequest(SocietyScopedModel, TimeStampedModel):
+    """Module 6.5 — urgent leave ("chutti"): one worker, one engagement, one day.
+
+    ---------------------------------------------------------------------------
+    THERE IS NO PENDING STATE, AND THAT IS THE WHOLE DESIGN
+    ---------------------------------------------------------------------------
+    Leave is approved the moment it is asked for. Not as a convenience — as the
+    mechanism. A worker who must justify a sick child to an app before they can
+    stay home with them does not wait for the answer; they simply do not turn up,
+    and the household finds out at seven in the morning with no time to plan.
+    Instant approval is what buys the notice, and the notice is the thing of
+    value here.
+
+    So the resident is never asked *whether* the worker may take the day. They
+    are asked the only question they can actually answer: **do you need someone
+    else today?**
+
+    ---------------------------------------------------------------------------
+    WHY THIS IS A ROW WHEN THE REST OF MODULE 6 IS DERIVED
+    ---------------------------------------------------------------------------
+    ``schedule.py`` stores nothing and expands engagements on read, because a
+    materialised calendar drifts from the agreement it was built from. Leave is
+    the exception that proves it: an absence is *not* derivable from the
+    engagement, the booking, or the availability calendar. It is a fact about one
+    day that exists nowhere else, so it gets a row — and ``schedule.py`` reads it
+    back when it expands, rather than the row being a second copy of the visit.
+
+    ---------------------------------------------------------------------------
+    THE MONEY
+    ---------------------------------------------------------------------------
+    Settlement is recorded here but the deduction is **not** applied here. Salary
+    is pro-rated from attendance (``payments.services.salary_basis``): a day not
+    worked is already a day not counted, so deducting again in this model would
+    dock the same absence twice. What this row adds is the *transfer* — what the
+    replacement is owed — and a frozen record of the arithmetic that produced it.
+    See :func:`apps.scheduling.services.settle_leave`.
+    """
+
+    engagement = models.ForeignKey(
+        "hiring.Engagement", on_delete=models.CASCADE, related_name="leave_requests"
+    )
+    worker = models.ForeignKey(
+        "workers.WorkerProfile", on_delete=models.CASCADE, related_name="leave_requests"
+    )
+    leave_date = models.DateField(db_index=True)
+
+    #: Always optional. A worker should not have to describe a private
+    #: emergency to a form in order to be believed, and a required field here
+    #: would mostly collect fiction.
+    reason = models.CharField(max_length=200, blank=True)
+
+    status = models.CharField(
+        max_length=30,
+        choices=LeaveStatus.choices,
+        default=LeaveStatus.APPROVED,
+        db_index=True,
+    )
+
+    replacement = models.ForeignKey(
+        "workers.WorkerProfile",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replacement_assignments",
+    )
+    replacement_confirmed_at = models.DateTimeField(null=True, blank=True)
+    resident_responded_at = models.DateTimeField(null=True, blank=True)
+
+    #: Frozen at settlement rather than derived on read. The day rate moves with
+    #: the month and with the engagement's terms, and a receipt that silently
+    #: disagrees with the payment it explains is worse than no receipt.
+    day_rate_paise = models.PositiveIntegerField(default=0)
+    #: What the original worker forgoes — equal to what the replacement receives.
+    forgone_paise = models.PositiveIntegerField(default=0)
+    #: What the replacement is paid. Their ``Payment`` row is the authority; this
+    #: is the copy that makes the leave record readable on its own.
+    replacement_paise = models.PositiveIntegerField(default=0)
+    settled_at = models.DateTimeField(null=True, blank=True)
+
+    objects = LeaveRequestQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-leave_date", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["engagement", "leave_date"],
+                name="one_leave_request_per_engagement_day",
+            ),
+            # A worker cannot stand in for their own absence.
+            models.CheckConstraint(
+                condition=~models.Q(replacement=models.F("worker")),
+                name="replacement_is_not_the_absent_worker",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "leave_date"]),
+            models.Index(fields=["worker", "leave_date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.worker} on leave {self.leave_date} ({self.status})"
+
+    @property
+    def is_settled(self) -> bool:
+        return self.settled_at is not None
+
+    @property
+    def needs_resident_response(self) -> bool:
+        return self.status == LeaveStatus.APPROVED
+
+    @property
+    def can_withdraw(self) -> bool:
+        """Withdrawable only while nobody else has committed to the day."""
+        return self.status in WITHDRAWABLE_LEAVE_STATUSES and not self.is_settled
+
+    @property
+    def is_covered(self) -> bool:
+        """Whether somebody is actually coming."""
+        return self.status == LeaveStatus.REPLACEMENT_CONFIRMED
+
+    @property
+    def summary(self) -> str:
+        """One line for a notification or a list row."""
+        if self.status == LeaveStatus.REPLACEMENT_CONFIRMED and self.replacement_id:
+            return f"{self.replacement.user.get_full_name()} is covering this visit."
+        if self.status == LeaveStatus.WAIVED:
+            return "No replacement needed."
+        if self.status == LeaveStatus.UNFILLED:
+            return "No replacement was found for this visit."
+        if self.status == LeaveStatus.WITHDRAWN:
+            return "The leave was withdrawn."
+        if self.status == LeaveStatus.REPLACEMENT_REQUESTED:
+            return "Looking for a replacement."
+        return "Waiting for the household to say whether they need cover."
+
+
 class ReminderKind(models.TextChoices):
     UPCOMING_ENGAGEMENT = "upcoming_engagement", _("Recurring visit due")
     UPCOMING_BOOKING = "upcoming_booking", _("One-day booking due")

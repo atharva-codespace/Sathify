@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from django.db import transaction
 from django.utils import timezone
 
+from apps.core.files import local_path
 from apps.scheduling.schedule import ScheduleItem, society_schedule, worker_day
 from apps.societies.models import Gate
 from apps.workers.models import WorkerProfile
@@ -480,8 +481,13 @@ def sync_events(rows: list[dict], *, guard, society) -> SyncOutcome:
 # ---------------------------------------------------------------------------
 
 
-def run_face_check(event: AttendanceEvent, live_photo_path: str) -> FaceResult:
-    """Compare a live gate photo against the worker's registered photo.
+def run_face_check(event: AttendanceEvent) -> FaceResult:
+    """Compare the event's live gate photo against the worker's registered one.
+
+    Both photos are read from the event, which the caller has already saved, so
+    that this never has to be handed a filesystem path — in production neither
+    file is on this machine's disk. :func:`local_path` supplies the real paths
+    the CV engines require, from whichever storage backend is configured.
 
     Records the outcome on the event and, when the comparison did not clear the
     threshold, moves the event to ``PENDING_REVIEW`` — never to ``DENIED``. See
@@ -492,13 +498,31 @@ def run_face_check(event: AttendanceEvent, live_photo_path: str) -> FaceResult:
     nothing about who is standing at the gate.
     """
     reference = event.worker.photo
-    if not reference:
+    live = event.face_photo
+
+    if not live:
+        result = FaceResult(
+            available=False,
+            reason="No live photo was captured for this event.",
+        )
+    elif not reference:
         result = FaceResult(
             available=False,
             reason="This worker has no registered photo to compare against.",
         )
     else:
-        result = verify_face(live_photo_path, reference.path)
+        try:
+            with local_path(live) as live_path, local_path(reference) as reference_path:
+                result = verify_face(live_path, reference_path)
+        except Exception as exc:  # noqa: BLE001
+            # Fetching either photo from storage can fail; like every other
+            # failure here that is "nothing measured", not a denial, so the
+            # guard decides visually rather than the worker being turned away.
+            logger.exception("Could not fetch photos for face check on event %s", event.pk)
+            result = FaceResult(
+                available=False,
+                reason=f"The photos could not be retrieved for comparison: {exc}",
+            )
 
     event.face_checked = True
     event.face_match_score = result.score

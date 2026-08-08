@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
+from django.db.models import Q
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
@@ -42,7 +43,7 @@ from apps.hiring.models import Engagement
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
 
-from .models import Reminder, TaskTiming
+from .models import LeaveRequest, Reminder, TaskTiming
 from .schedule import (
     MAX_SCHEDULE_DAYS,
     ScheduleRangeTooWide,
@@ -54,14 +55,32 @@ from .schedule import (
 from .serializers import (
     ConflictQuerySerializer,
     ConflictReportSerializer,
+    LeaveCreateSerializer,
+    LeaveRequestSerializer,
+    LeaveResponseSerializer,
     ReminderDeliverySerializer,
     ReminderSerializer,
+    ReplacementAssignSerializer,
+    ReplacementCandidateSerializer,
     ScheduleConflictPairSerializer,
     ScheduleItemSerializer,
     TaskTimingSerializer,
     TaskTimingWriteSerializer,
 )
-from .services import check_conflict, due_reminders, effective_timing, ensure_reminders_for_worker
+from .services import (
+    DuplicateLeave,
+    LeaveError,
+    assign_replacement,
+    check_conflict,
+    close_lapsed_leave,
+    due_reminders,
+    effective_timing,
+    ensure_reminders_for_worker,
+    replacement_candidates,
+    request_leave,
+    respond_to_leave,
+    withdraw_leave,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -456,3 +475,282 @@ class ReminderDeliveredView(APIView):
             message = "Reminder marked failed."
 
         return Response({"reminder": ReminderSerializer(reminder).data, "message": message})
+
+
+# ---------------------------------------------------------------------------
+# 6.5 Urgent leave ("chutti")
+# ---------------------------------------------------------------------------
+
+
+def _visible_leave(user):
+    """Leave requests this caller is entitled to see.
+
+    Scoped by relationship, not by society alone: a resident sees leave for
+    their own engagements, a worker sees their own days off *and* the days they
+    have agreed to cover, and an administrator sees their society's. Anyone
+    else sees nothing.
+    """
+    from apps.societies.models import Resident
+
+    base = LeaveRequest.objects.select_related(
+        "worker__user",
+        "replacement__user",
+        "engagement__resident__user",
+        "engagement__resident__flat__tower",
+    )
+
+    if user.role == Role.WORKER:
+        profile = WorkerProfile.objects.filter(user=user).first()
+        if profile is None:
+            return LeaveRequest.objects.none()
+        return base.filter(Q(worker=profile) | Q(replacement=profile)).distinct()
+
+    if user.role == Role.RESIDENT:
+        from apps.societies.models import Resident as _Resident
+
+        resident = _Resident.objects.filter(user=user).first()
+        if resident is None:
+            return LeaveRequest.objects.none()
+        return base.filter(engagement__resident=resident)
+
+    if user.is_society_admin and user.society_id is not None:
+        return base.filter(society_id=user.society_id)
+
+    return LeaveRequest.objects.none()
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Apply for urgent leave, or list your leave",
+    request=LeaveCreateSerializer,
+    responses=LeaveRequestSerializer,
+)
+class LeaveListCreateView(APIView):
+    """Module 6.5 - a worker takes a day off, and it is approved immediately.
+
+    There is no approval step and no administrator in the path. See
+    ``LeaveRequest`` for why instant approval is the mechanism rather than a
+    convenience: it is what buys the household enough notice to plan.
+    """
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = LeaveRequestSerializer
+
+    def get(self, request):
+        # Lazy sweep, as everywhere else in this module: no scheduler exists, so
+        # opening the list is what closes days nobody answered for.
+        close_lapsed_leave()
+
+        queryset = _visible_leave(request.user)
+        upcoming = request.query_params.get("upcoming")
+        if upcoming and upcoming.lower() not in {"0", "false"}:
+            queryset = queryset.filter(leave_date__gte=timezone.localdate())
+
+        items = list(queryset[:100])
+        return Response(
+            {
+                "count": len(items),
+                "results": LeaveRequestSerializer(items, many=True).data,
+            }
+        )
+
+    def post(self, request):
+        profile = WorkerProfile.objects.filter(user=request.user).first()
+        if profile is None:
+            return _error(
+                "not_a_worker",
+                "Only the worker on an engagement can take leave from it.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = LeaveCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        engagement = (
+            Engagement.objects.filter(pk=data["engagement"], worker=profile)
+            .select_related("resident__user", "worker__user", "society")
+            .first()
+        )
+        if engagement is None:
+            return _error(
+                "not_found",
+                "That engagement was not found, or is not yours.",
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            leave = request_leave(
+                engagement,
+                leave_date=data["leave_date"],
+                reason=data["reason"],
+                by=request.user,
+            )
+        except DuplicateLeave as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+        except LeaveError as exc:
+            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "leave": LeaveRequestSerializer(leave).data,
+                "message": (
+                    "Your leave is approved. The household has been told and "
+                    "will say whether they need cover."
+                ),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Say whether cover is needed",
+    request=LeaveResponseSerializer,
+    responses=LeaveRequestSerializer,
+)
+class LeaveResponseView(APIView):
+    """The household's only decision here: do you need someone else that day?"""
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = LeaveResponseSerializer
+
+    def post(self, request, pk):
+        leave = _visible_leave(request.user).filter(pk=pk).first()
+        if leave is None:
+            return _error("not_found", "Leave request not found.", status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == Role.WORKER:
+            return _error(
+                "not_the_household",
+                "Only the household can say whether they need cover.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = LeaveResponseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            leave = respond_to_leave(
+                leave,
+                needs_replacement=serializer.validated_data["needs_replacement"],
+                by=request.user,
+            )
+        except LeaveError as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+
+        return Response({"leave": LeaveRequestSerializer(leave).data})
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Workers who could cover this visit",
+    responses=ReplacementCandidateSerializer(many=True),
+)
+class ReplacementCandidatesView(APIView):
+    """Module 6.5 - who is free, ranked by Module 4.3's scorer."""
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = ReplacementCandidateSerializer
+
+    def get(self, request, pk):
+        leave = _visible_leave(request.user).filter(pk=pk).first()
+        if leave is None:
+            return _error("not_found", "Leave request not found.", status.HTTP_404_NOT_FOUND)
+
+        ranked = replacement_candidates(leave)
+        results = [
+            {
+                "worker_id": worker.pk,
+                "name": worker.user.get_full_name(),
+                "photo_url": worker.photo.url if worker.photo else "",
+                "trust_score": float(worker.trust_score or 0),
+                "average_rating": float(worker.average_rating or 0),
+                "rating_count": getattr(worker, "rating_count", 0) or 0,
+                "match_score": match.total,
+                "match_percentage": match.percentage,
+                "components": match.explain(),
+            }
+            for worker, match in ranked
+        ]
+        return Response({"count": len(results), "results": results})
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Confirm who is covering",
+    request=ReplacementAssignSerializer,
+    responses=LeaveRequestSerializer,
+)
+class AssignReplacementView(APIView):
+    """Confirms the replacement and settles their pay in one transaction."""
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+    serializer_class = ReplacementAssignSerializer
+
+    def post(self, request, pk):
+        leave = _visible_leave(request.user).filter(pk=pk).first()
+        if leave is None:
+            return _error("not_found", "Leave request not found.", status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == Role.WORKER:
+            return _error(
+                "not_the_household",
+                "Only the household or an administrator can confirm cover.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = ReplacementAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        replacement = (
+            WorkerProfile.objects.filter(pk=serializer.validated_data["replacement"])
+            .select_related("user")
+            .first()
+        )
+        if replacement is None:
+            return _error("not_found", "That worker was not found.", status.HTTP_404_NOT_FOUND)
+
+        try:
+            leave = assign_replacement(leave, replacement, by=request.user)
+        except LeaveError as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+
+        return Response(
+            {
+                "leave": LeaveRequestSerializer(leave).data,
+                "message": f"{replacement.user.get_full_name()} is covering this visit.",
+            }
+        )
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Withdraw leave",
+    responses=LeaveRequestSerializer,
+)
+class WithdrawLeaveView(APIView):
+    """The worker can come after all - refused once cover is confirmed."""
+
+    permission_classes = [IsEngagementParty]
+    serializer_class = LeaveRequestSerializer
+
+    def post(self, request, pk):
+        profile = WorkerProfile.objects.filter(user=request.user).first()
+        if profile is None:
+            return _error(
+                "not_a_worker",
+                "Only the worker who took the leave can withdraw it.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        leave = LeaveRequest.objects.filter(pk=pk, worker=profile).first()
+        if leave is None:
+            return _error("not_found", "Leave request not found.", status.HTTP_404_NOT_FOUND)
+
+        try:
+            leave = withdraw_leave(leave, by=request.user)
+        except LeaveError as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+
+        return Response({"leave": LeaveRequestSerializer(leave).data})

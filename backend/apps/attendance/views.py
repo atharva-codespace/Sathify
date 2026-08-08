@@ -499,10 +499,21 @@ class FaceCheckView(APIView):
         serializer = FaceCheckSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        event.face_photo = serializer.validated_data["photo"]
-        event.save(update_fields=["face_photo", "updated_at"])
+        # As with KYC uploads, storing the file is the one step that talks to a
+        # service outside this process. A storage failure gets a retryable
+        # message rather than a 500 at the gate.
+        try:
+            event.face_photo = serializer.validated_data["photo"]
+            event.save(update_fields=["face_photo", "updated_at"])
+        except Exception:  # noqa: BLE001 — any storage error, not just one library's
+            logger.exception("Could not store face photo for event %s", event.pk)
+            return _error(
+                "storage_unavailable",
+                "We could not save that photo just now. Please try again in a moment.",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
-        result = run_face_check(event, event.face_photo.path)
+        result = run_face_check(event)
 
         return Response(
             {

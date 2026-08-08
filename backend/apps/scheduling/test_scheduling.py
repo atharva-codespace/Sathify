@@ -12,6 +12,8 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
@@ -214,22 +216,31 @@ class TestWorkerSchedule:
             worker_schedule(worker.pk, MONDAY, MONDAY - dt.timedelta(days=1))
 
     def test_query_count_does_not_grow_with_the_range(
-        self, society, resident, worker, maid_service, django_assert_num_queries
+        self, society, resident, worker, maid_service
     ):
         """The property that matters: cost is independent of how many days.
 
-        Asserted as "the same for one day as for a fortnight" rather than as a
-        fixed number, so adding a legitimate prefetch does not fail the test
-        while an N+1 regression — which scales with the range — still does.
+        Compared rather than hardcoded, which is what this test always claimed
+        to do. A fixed number fails the moment a legitimate constant query is
+        added — Module 6.5's leave lookup added two — while saying nothing about
+        the thing actually worth protecting. An N+1 regression scales with the
+        range and still fails here, which is the point.
+
+        The ceiling is a second, weaker guard: constant is not the same as
+        cheap, and a dozen constant queries per schedule read would be its own
+        problem on a free-tier instance.
         """
         make_engagement(society, resident, worker, maid_service, days_of_week=[0, 1, 2, 3, 4])
         make_booking(society, resident, worker, MONDAY)
 
-        with django_assert_num_queries(3):
+        with CaptureQueriesContext(connection) as one_day:
             worker_schedule(worker.pk, MONDAY, MONDAY)
 
-        with django_assert_num_queries(3):
+        with CaptureQueriesContext(connection) as fortnight:
             worker_schedule(worker.pk, MONDAY, MONDAY + dt.timedelta(days=13))
+
+        assert len(fortnight) == len(one_day)
+        assert len(one_day) <= 8, f"{len(one_day)} queries for one day is too many"
 
 
 class TestFindOverlaps:

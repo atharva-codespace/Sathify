@@ -445,6 +445,10 @@ class Engagement {
     this.endReason = '',
     this.endNote = '',
     this.endedAt,
+    this.lastWorkingDay,
+    this.isServingNotice = false,
+    this.noticeDaysRemaining = 0,
+    this.visitsRemaining = 0,
   });
 
   final int id;
@@ -462,6 +466,23 @@ class Engagement {
   final String endReason;
   final String endNote;
   final DateTime? endedAt;
+
+  // --- 4.6 notice period ---------------------------------------------------
+  //
+  // An engagement serving notice is still ACTIVE and still produces visits.
+  // Anything that reads [isActive] to decide whether work is happening stays
+  // correct without knowing about notice at all — which is the point.
+
+  /// The last day this arrangement calls for a visit, once notice is given.
+  final DateTime? lastWorkingDay;
+  final bool isServingNotice;
+
+  /// Calendar days until [lastWorkingDay].
+  final int noticeDaysRemaining;
+
+  /// Visits left before then — a different and more useful number. Ten days'
+  /// notice on a Tuesday-only engagement is one more visit, not ten.
+  final int visitsRemaining;
 
   bool get isActive => status == EngagementStatus.active;
   bool get isPaused => status == EngagementStatus.paused;
@@ -493,7 +514,42 @@ class Engagement {
         endReason: json['end_reason'] as String? ?? '',
         endNote: json['end_note'] as String? ?? '',
         endedAt: DateTime.tryParse(json['ended_at'] as String? ?? ''),
+        lastWorkingDay:
+            DateTime.tryParse(json['last_working_day'] as String? ?? ''),
+        isServingNotice: json['is_serving_notice'] as bool? ?? false,
+        noticeDaysRemaining: json['notice_days_remaining'] as int? ?? 0,
+        visitsRemaining: json['visits_remaining'] as int? ?? 0,
       );
+}
+
+/// Module 4.6 — the ten-day notice rule, client side.
+///
+/// Mirrors `NOTICE_PERIOD_DAYS` in `apps/hiring/models.py`. The server is the
+/// authority and refuses anything shorter with `notice_too_short`; this exists
+/// so a date picker cannot offer a day the server is going to reject, which is
+/// a worse experience than one that was never selectable.
+class NoticePeriod {
+  const NoticePeriod._();
+
+  static const int days = 10;
+
+  /// The earliest permitted last working day, counted from [today].
+  ///
+  /// Built with `DateTime(y, m, d + n)` rather than `add(Duration(days: n))`:
+  /// a Duration is absolute, so a clock or timezone change can land the result
+  /// on the wrong calendar day. India has no DST, but the phone's timezone is
+  /// the user's to change and this costs nothing to get right.
+  static DateTime earliestLastDay(DateTime today) =>
+      DateTime(today.year, today.month, today.day + days);
+
+  static bool isPermitted(DateTime candidate, {required DateTime today}) =>
+      !candidate.isBefore(earliestLastDay(today));
+
+  /// What somebody is told before they confirm — concrete, not a rule.
+  static String summary({required int visitsRemaining}) =>
+      visitsRemaining == 1
+          ? 'One more visit before then, and it is paid.'
+          : '$visitsRemaining more visits before then, and all of them are paid.';
 }
 
 /// Filters for the Module 4.1 search, converted to query parameters in one

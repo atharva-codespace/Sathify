@@ -1,5 +1,6 @@
 import '../../../../core/config/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
+import '../../../bookings/data/models/booking_models.dart' show formatWireDate;
 import '../models/hiring_models.dart';
 
 /// All Module 4 endpoints — discovery, hire requests, and engagements.
@@ -145,6 +146,41 @@ class HiringRepository {
         reason: reason.wireValue,
         note: note,
       );
+
+  // --- 4.6 Notice period -----------------------------------------------------
+
+  /// Ends the arrangement with notice. The engagement stays **active** and its
+  /// visits keep appearing on both schedules until [lastWorkingDay].
+  ///
+  /// Omitting [lastWorkingDay] takes the earliest the server permits, which is
+  /// what most people want. Anything shorter than [NoticePeriod.days] is
+  /// refused with `notice_too_short`, and the error details carry the earliest
+  /// date back so the caller can correct itself rather than guess.
+  Future<Engagement> giveNotice(
+    int engagementId, {
+    required EngagementEndReason reason,
+    DateTime? lastWorkingDay,
+    String note = '',
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.giveNotice(engagementId),
+      data: {
+        'reason': reason.wireValue,
+        if (lastWorkingDay != null)
+          'last_working_day': formatWireDate(lastWorkingDay),
+        if (note.isNotEmpty) 'note': note,
+      },
+    ) as Map<String, dynamic>;
+
+    return Engagement.fromJson(response['engagement'] as Map<String, dynamic>);
+  }
+
+  /// Both sides changed their mind before the last working day.
+  Future<Engagement> withdrawNotice(int engagementId) async {
+    final response = await _client.post(ApiEndpoints.withdrawNotice(engagementId))
+        as Map<String, dynamic>;
+    return Engagement.fromJson(response['engagement'] as Map<String, dynamic>);
+  }
 
   Future<Engagement> _transition(
     int engagementId, {
