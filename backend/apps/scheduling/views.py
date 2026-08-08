@@ -35,6 +35,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Role
+from apps.bookings.services import BookingError
 from apps.accounts.permissions import (
     IsApprovedSocietyAdmin,
     IsEngagementParty,
@@ -887,6 +888,13 @@ class MarkTaskCompleteView(APIView):
             )
         except LeaveError as exc:
             return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+        except BookingError as exc:
+            # Completing a booking-backed visit settles the booking too, and
+            # that can legitimately refuse — the job has not started yet, or
+            # was never confirmed. Caught explicitly because the handler below
+            # would otherwise report a business-rule refusal as a storage
+            # outage and tell the worker to try again, which will never help.
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
         except Exception:  # noqa: BLE001 — any storage error, not just one library's
             # Storing the photo is the one step that leaves this process. A
             # media backend that is down must not cost a worker the record of a

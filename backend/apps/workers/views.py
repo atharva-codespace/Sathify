@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 
+from django.db import DatabaseError
 from drf_spectacular.utils import extend_schema
 from rest_framework import generics, status
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -101,6 +102,38 @@ def _own_profile(request):
     return WorkerProfile.objects.filter(user=request.user).first()
 
 
+def _save_or_storage_error(serializer, **kwargs):
+    """Save a profile, turning a media-backend failure into a real answer.
+
+    Returns the saved instance, or a :class:`Response` the caller should return
+    as-is.
+
+    Saving a profile writes the photo, and writing the photo is the one step
+    that leaves this process. It had no handling at all, so a misconfigured
+    media backend surfaced as a bare 500 — which is exactly what a worker saw
+    while a missing storage bucket made every upload fail: "something went
+    wrong on our side", with nothing in it to act on and nothing distinguishing
+    it from a code fault.
+
+    The KYC view has said the useful thing for a while
+    (``storage_unavailable``, 503, retryable); this is the same treatment for
+    the other endpoint that stores a file. A ``DatabaseError`` is deliberately
+    left to propagate: it is not retryable and should be logged as the fault it
+    is rather than dressed up as a transient outage.
+    """
+    try:
+        return serializer.save(**kwargs)
+    except DatabaseError:
+        raise
+    except Exception:  # noqa: BLE001 — any storage error, not just one library's
+        logger.exception("Could not store the profile photo")
+        return _error(
+            "storage_unavailable",
+            "We could not save your photo just now. Please try again in a moment.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Catalogue
 # ---------------------------------------------------------------------------
@@ -156,7 +189,10 @@ class MyWorkerProfileView(APIView):
 
         serializer = WorkerProfileWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        profile = serializer.save(user=request.user)
+
+        profile = _save_or_storage_error(serializer, user=request.user)
+        if isinstance(profile, Response):
+            return profile
 
         logger.info("Worker profile created for user %s", request.user.pk)
         return Response(
@@ -180,7 +216,10 @@ class MyWorkerProfileView(APIView):
 
         serializer = WorkerProfileWriteSerializer(profile, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        profile = serializer.save()
+
+        profile = _save_or_storage_error(serializer)
+        if isinstance(profile, Response):
+            return profile
 
         return Response(
             {
@@ -248,7 +287,27 @@ class KycUploadView(APIView):
                 worker=profile,
                 document_image=serializer.validated_data["document"],
             )
+        except DatabaseError:
+            # NOT a storage problem, and it matters that the two are told
+            # apart. This branch used to be swallowed by the catch below and
+            # reported as "we could not save your document", which sends the
+            # worker into a retry loop against a fault that will reproduce
+            # every time, and sends whoever is debugging it to the wrong
+            # subsystem. The code is distinct so a log line identifies which.
+            logger.exception(
+                "Database error recording KYC for worker %s", profile.pk
+            )
+            return _error(
+                "kyc_record_failed",
+                "We could not record your document just now. Please try again "
+                "in a moment.",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except Exception:  # noqa: BLE001 — any storage error, not just one library's
+            # Writing the file is the one step here that leaves this process,
+            # so this is a misconfigured or unreachable media backend. See
+            # `manage.py check_media_storage`, which reproduces exactly this
+            # write and reports why it failed.
             logger.exception("Could not store KYC document for worker %s", profile.pk)
             return _error(
                 "storage_unavailable",
