@@ -420,7 +420,7 @@ class _TimeColumn extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            item.startTimeLabel,
+            item.displayTimeLabel,
             style: const TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w700,

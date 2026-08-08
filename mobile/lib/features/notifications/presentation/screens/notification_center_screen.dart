@@ -34,6 +34,29 @@ class _NotificationCenterScreenState
     extends ConsumerState<NotificationCenterScreen> {
   bool _unreadOnly = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // Opening the centre is treated as reading everything currently in it —
+    // otherwise the badge on every other screen keeps counting messages the
+    // person has, in fact, just looked at, and only tapping each one
+    // individually (or the explicit "mark all read" button) would clear it.
+    unawaited(_autoMarkAllRead());
+  }
+
+  Future<void> _autoMarkAllRead() async {
+    try {
+      final count =
+          await ref.read(notificationRepositoryProvider).markAllRead();
+      if (!mounted || count == 0) return;
+      invalidateNotifications(ref);
+    } on ApiException catch (_) {
+      // Silent — this is a courtesy pass on opening the screen, not a
+      // user-initiated action. The "mark all read" button in the app bar
+      // still works if this one request happens to fail.
+    }
+  }
+
   Future<void> _markAllRead() async {
     final messenger = ScaffoldMessenger.of(context);
     try {

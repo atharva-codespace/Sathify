@@ -156,8 +156,25 @@ def expected_visits_for(worker_id, at: dt.datetime) -> list[ScheduleItem]:
     return [
         item
         for item in worker_day(worker_id, local.date())
-        if abs(item.start_minutes - minutes) <= VISIT_MATCH_WINDOW_MINUTES
+        if _within_visit_window(item, minutes)
     ]
+
+
+def _within_visit_window(item: ScheduleItem, minutes: int) -> bool:
+    """Whether ``minutes`` (since midnight) falls near this visit.
+
+    Near either edge, not just the start. An arrival is close to
+    ``start_minutes``, but a departure is close to ``end_minutes`` — often
+    hours later for anything but a short visit — and anchoring the match to
+    the start alone means every departure from a longer visit looks
+    unexpected, which is exactly what would silently drop the "has left"
+    notification and the "Expected today" banner the guard sees.
+    """
+    return (
+        item.start_minutes - VISIT_MATCH_WINDOW_MINUTES
+        <= minutes
+        <= item.end_minutes + VISIT_MATCH_WINDOW_MINUTES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +279,31 @@ def _notify_resident_of_arrival(event, worker, society) -> None:
     )
 
 
+def _notify_resident_of_departure(event, worker, society) -> None:
+    """The other half of :func:`_notify_resident_of_arrival`.
+
+    Without this, a household is told when their worker turns up and then
+    hears nothing further — the departure that closes out the visit vanishes
+    silently, which reads as the app never having noticed it left.
+    """
+    from apps.notifications.models import NotificationCategory
+    from apps.notifications.services import notify
+
+    source = event.engagement or event.booking
+    resident = getattr(source, "resident", None)
+    if resident is None:
+        return
+
+    notify(
+        recipient=resident.user,
+        category=NotificationCategory.ATTENDANCE,
+        title=f"{worker.user.get_full_name()} has left",
+        body="Logged at the gate just now.",
+        data={"route": "/schedule"},
+        society=society,
+    )
+
+
 @transaction.atomic
 def record_event(
     *,
@@ -331,15 +373,14 @@ def record_event(
     # which is exactly why it is a separate category from GATE_ENTRY rather
     # than reusing the safety-critical one that cannot be muted.
     #
-    # Only for an arrival that was actually expected. Notifying on an
-    # unscheduled entry would tell a resident their worker had arrived on a day
-    # nobody booked one.
-    elif (
-        decision == Decision.ALLOWED
-        and direction == Direction.ENTRY
-        and event.was_expected
-    ):
-        _notify_resident_of_arrival(event, worker, society)
+    # Only for an arrival — or departure — that was actually expected.
+    # Notifying on an unscheduled entry would tell a resident their worker had
+    # arrived on a day nobody booked one.
+    elif decision == Decision.ALLOWED and event.was_expected:
+        if direction == Direction.ENTRY:
+            _notify_resident_of_arrival(event, worker, society)
+        elif direction == Direction.EXIT:
+            _notify_resident_of_departure(event, worker, society)
 
     logger.info(
         "Attendance %s: worker=%s %s %s expected=%s offline=%s",

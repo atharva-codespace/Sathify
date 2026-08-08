@@ -270,19 +270,41 @@ class _WaitingSummary extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.gutter),
       child: AppCard(
-        padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
-        child: Row(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md,
+          vertical: AppSpacing.md,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _Metric(label: 'Workers', value: workers),
-            const _Rule(),
-            _Metric(label: 'Residents', value: residents),
-            const _Rule(),
-            _Metric(label: 'Reviews', value: reviews),
-            const _Rule(),
-            _Metric(
-              label: 'Overdue',
-              value: overdue,
-              tone: (overdue ?? 0) > 0 ? AppTone.danger : AppTone.neutral,
+            // Every number below is "still waiting on you", not a total — a
+            // fully-approved, fully-caught-up society shows zeroes across the
+            // whole row, and that is the good outcome, not a sign nobody is
+            // registered. Said once here rather than lengthening each label
+            // individually, which just made the row wrap on narrow phones.
+            const Text(
+              'Waiting on you',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textTertiary,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            Row(
+              children: [
+                _Metric(label: 'Workers', value: workers),
+                const _Rule(),
+                _Metric(label: 'Residents', value: residents),
+                const _Rule(),
+                _Metric(label: 'Reviews', value: reviews),
+                const _Rule(),
+                _Metric(
+                  label: 'Overdue',
+                  value: overdue,
+                  tone: (overdue ?? 0) > 0 ? AppTone.danger : AppTone.neutral,
+                ),
+              ],
             ),
           ],
         ),

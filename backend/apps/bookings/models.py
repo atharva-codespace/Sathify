@@ -126,9 +126,12 @@ class ServiceCategory(TimeStampedModel):
     bypasses_notice_period = models.BooleanField(
         default=False,
         help_text=_(
-            "Exempts this category from the society's minimum booking notice. "
-            "Set for emergency assistance: a notice window that blocks an "
-            "emergency defeats the purpose of the category."
+            "Exempts this category from the society's minimum booking notice, "
+            "and from requiring workers to have pre-marked the date as one "
+            "they can work (see bookings.services.candidate_workers). Set for "
+            "emergency assistance: nobody pre-declares availability for an "
+            "emergency that has not happened yet, so a category meant to be "
+            "bookable at short notice needs both exemptions to actually work."
         ),
     )
 

@@ -57,7 +57,7 @@ from apps.accounts.permissions import (
     IsEngagementParty,
     IsSocietyAdmin,
 )
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingStatus
 from apps.hiring.models import Engagement
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
@@ -67,6 +67,7 @@ from .models import (
     Payment,
     PaymentDispute,
     PaymentKind,
+    PaymentStatus,
     ReplacementSplit,
     rupees_to_paise,
 )
@@ -353,6 +354,34 @@ class CreateBookingPaymentView(APIView):
         )
         if booking is None:
             return _error("not_found", "Booking not found.", status.HTTP_404_NOT_FOUND)
+
+        # Module 8 bills for completed work, not requested work — see the
+        # docstring on services.complete_booking. Nothing was previously
+        # stopping a resident from paying the moment a booking was confirmed,
+        # before the worker had even started.
+        if booking.status != BookingStatus.COMPLETED:
+            return _error(
+                "not_completed",
+                "This job is not marked complete yet. Payment opens once the "
+                "worker has finished.",
+                status.HTTP_409_CONFLICT,
+            )
+
+        # Idempotent on the booking: nothing stops the app from calling this
+        # twice — a resident re-opening the booking, a retried request on a
+        # poor connection — and there is no other constraint stopping two
+        # ledger rows for the same job. A failed or cancelled attempt is not
+        # "alive" and should not block a fresh one.
+        existing = (
+            Payment.objects.filter(booking=booking, kind=PaymentKind.BOOKING)
+            .exclude(status__in=[PaymentStatus.FAILED, PaymentStatus.CANCELLED])
+            .first()
+        )
+        if existing is not None:
+            return Response(
+                {"payment": PaymentSerializer(existing).data},
+                status=status.HTTP_200_OK,
+            )
 
         try:
             payment = create_payment(

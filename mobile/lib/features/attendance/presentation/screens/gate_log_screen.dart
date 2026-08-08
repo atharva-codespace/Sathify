@@ -69,6 +69,18 @@ class _GateLogScreenState extends ConsumerState<GateLogScreen>
   }
 }
 
+/// Tries to drain the offline queue before refetching. Silent about a sync
+/// failure — a still-weak signal is not this gesture's news to deliver, the
+/// list simply comes back unchanged and the amber banner is still there.
+Future<void> _refresh(WidgetRef ref) async {
+  try {
+    await ref.read(attendanceRepositoryProvider).syncPending();
+  } on ApiException {
+    // Fall through to the plain refetch below regardless.
+  }
+  invalidateAttendance(ref);
+}
+
 class _TodayTab extends ConsumerWidget {
   const _TodayTab();
 
@@ -92,7 +104,11 @@ class _TodayTab extends ConsumerWidget {
           );
         }
         return RefreshIndicator(
-          onRefresh: () async => ref.invalidate(gateLogProvider),
+          // Drains the offline queue before refetching: pull-to-refresh is the
+          // gesture a guard already reaches for when something looks missing,
+          // so it should also be the thing that gets a weak-signal entry
+          // unstuck, not just a second look at the same stale list.
+          onRefresh: () => _refresh(ref),
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(vertical: 8),
             itemCount: events.length,

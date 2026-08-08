@@ -99,19 +99,35 @@ def candidate_workers(
     """Workers who could in principle take this category on this date.
 
     Approved and searchable (Module 4's rule), qualified for the category's
-    service type, and carrying an explicit opt-in row for the date. The opt-in
-    is required rather than assumed: the modspec matches against workers who
-    have *marked themselves* available for that day, and treating silence as a
-    yes would send requests to workers who never said they were free.
+    service type, and — ordinarily — carrying an explicit opt-in row for the
+    date. The opt-in is required rather than assumed: the modspec matches
+    against workers who have *marked themselves* available for that day, and
+    treating silence as a yes would send requests to workers who never said
+    they were free.
+
+    ``bypasses_notice_period`` categories (emergency assistance) are the one
+    exception, and it is deliberately the *same* flag as the notice-period
+    exemption rather than a second one: both exist for the identical reason.
+    Nobody pre-declares availability for an emergency that has not happened
+    yet, so requiring the same advance opt-in as an ordinary booking would
+    leave the category permanently empty — exempting the notice period while
+    still requiring a day's advance opt-in would not actually make same-day
+    emergency help findable. An explicit "not available" for the day is still
+    honoured either way; only *silence* stops being read as "no".
     """
     queryset = searchable_workers(society_id)
 
     if category.service_type_id:
         queryset = queryset.filter(service_types=category.service_type_id)
 
-    queryset = queryset.filter(
-        day_availability__date=on_date, day_availability__is_available=True
-    )
+    if category.bypasses_notice_period:
+        queryset = queryset.exclude(
+            day_availability__date=on_date, day_availability__is_available=False
+        )
+    else:
+        queryset = queryset.filter(
+            day_availability__date=on_date, day_availability__is_available=True
+        )
 
     return (
         annotate_hiring_stats(queryset)
@@ -127,6 +143,24 @@ def candidate_workers(
         )
         .distinct()
     )
+
+
+def _covers_requested_slot(
+    rows, start_time: dt.time, duration_minutes: int, *, silence_means_covered: bool
+) -> bool:
+    """Whether a worker's declared day-availability window covers this slot.
+
+    A row that exists is always the authority — an explicit narrower window
+    (or an explicit "not available", already filtered out upstream) is
+    honoured regardless of category. It is only the *absence* of a row that
+    means something different depending on why the worker was a candidate at
+    all: an ordinary booking would not have included them without one, so
+    this only runs for an emergency category, where no row is exactly the
+    silence that candidate_workers() already chose to read as "yes".
+    """
+    if not rows:
+        return silence_means_covered
+    return any(row.covers(start_time, duration_minutes) for row in rows)
 
 
 def match_workers(
@@ -149,13 +183,19 @@ def match_workers(
     start_minutes = minutes_of(start_time)
     end_minutes = start_minutes + duration_minutes
 
-    # Honour a narrower window the worker declared for this specific day.
+    # Honour a narrower window the worker declared for this specific day. A
+    # worker with no row at all said nothing either way — candidate_workers()
+    # already decided what that silence means (excluded, ordinarily; included,
+    # for an emergency category), so a bare "no row" must not be re-filtered
+    # out here, or the emergency exemption above would be undone right back.
     covered = [
         worker
         for worker in candidates
-        if any(
-            row.covers(start_time, duration_minutes)
-            for row in getattr(worker, "requested_day_rows", [])
+        if _covers_requested_slot(
+            getattr(worker, "requested_day_rows", []),
+            start_time,
+            duration_minutes,
+            silence_means_covered=category.bypasses_notice_period,
         )
     ]
 

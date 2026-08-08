@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -38,8 +40,44 @@ class _GateScannerScreenState extends ConsumerState<GateScannerScreen> {
   /// Guards against the detector firing repeatedly while a sheet is open.
   bool _handling = false;
 
+  /// Retries the offline queue on a timer rather than waiting for the guard to
+  /// notice the banner and tap "Send now".
+  ///
+  /// A plain connectivity listener is not enough here: this gate's problem is
+  /// a *weak* signal, not being fully offline, so the device often still
+  /// reports "connected" while individual requests keep timing out. Polling
+  /// regardless of the reported connectivity state is what actually recovers
+  /// once the signal is good enough for one request to get through — the guard
+  /// never has to do anything for the day's log to catch up.
+  Timer? _retryTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _retryTimer = Timer.periodic(
+      const Duration(seconds: 25),
+      (_) => _retrySilently(),
+    );
+    // Also worth a try the moment the screen opens — the guard may have just
+    // walked back into signal after their queue built up elsewhere.
+    _retrySilently();
+  }
+
+  Future<void> _retrySilently() async {
+    final repository = ref.read(attendanceRepositoryProvider);
+    if (await repository.pendingCount() == 0) return;
+    try {
+      await repository.syncPending();
+      if (mounted) invalidateAttendance(ref);
+    } on ApiException {
+      // Still no usable signal. The timer tries again shortly; the banner and
+      // "Send now" remain for the guard to force it sooner.
+    }
+  }
+
   @override
   void dispose() {
+    _retryTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }

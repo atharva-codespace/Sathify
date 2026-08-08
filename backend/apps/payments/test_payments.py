@@ -739,6 +739,10 @@ class TestCreatingPayments:
     def test_a_tip_rides_on_the_same_charge(
         self, authenticated_client, resident_user, booking
     ):
+        # Payment only opens once the job is marked done.
+        booking.status = BookingStatus.COMPLETED
+        booking.save(update_fields=["status"])
+
         response = authenticated_client(resident_user).post(
             reverse("v1:payments:pay-booking"),
             {"booking": booking.pk, "tip_paise": 5000},
@@ -754,11 +758,26 @@ class TestCreatingPayments:
     def test_a_booking_price_crosses_from_rupees_to_paise_exactly_once(
         self, authenticated_client, resident_user, booking
     ):
+        booking.status = BookingStatus.COMPLETED
+        booking.save(update_fields=["status"])
+
         authenticated_client(resident_user).post(
             reverse("v1:payments:pay-booking"), {"booking": booking.pk}, format="json"
         )
 
         assert Payment.objects.get().amount_paise == booking.quoted_price * 100
+
+    def test_a_booking_cannot_be_paid_before_it_is_completed(
+        self, authenticated_client, resident_user, booking
+    ):
+        # The fixture defaults to CONFIRMED, not COMPLETED.
+        response = authenticated_client(resident_user).post(
+            reverse("v1:payments:pay-booking"), {"booking": booking.pk}, format="json"
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "not_completed"
+        assert not Payment.objects.exists()
 
     def test_a_non_primary_resident_cannot_pay(
         self, authenticated_client, resident_user, resident, booking
