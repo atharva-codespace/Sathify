@@ -140,6 +140,18 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
             "separately, so the resident authorises one amount."
         ),
     )
+    #: Module 8.7 — Sathify's own share, frozen at creation.
+    #:
+    #: Stored rather than derived on read: deriving it would mean a rate change
+    #: silently rewrites every historical receipt, so a resident who queried a
+    #: charge from three months ago would be shown a number that never happened.
+    #: Zero on everything today — see ``apps/payments/fees.py`` for why the
+    #: column ships before the price does.
+    platform_fee_paise = models.PositiveIntegerField(
+        default=0,
+        help_text=_("Platform fee charged on top of the amount, in paise."),
+    )
+
     refunded_paise = models.PositiveIntegerField(default=0)
 
     status = models.CharField(
@@ -162,6 +174,14 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
         null=True, blank=True, help_text=_("For a monthly salary payment.")
     )
     period_end = models.DateField(null=True, blank=True)
+
+    #: Module 8.8 — when this is owed, shown to the resident at confirmation.
+    #:
+    #: Nullable because rows created before this field existed genuinely have no
+    #: answer, and back-filling a guessed date would be worse than an honest
+    #: blank: "we don't know when this was due" is true, "it was due on the 1st"
+    #: might not be. Derived by ``services.payment_due_at`` for new rows.
+    due_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     paid_at = models.DateTimeField(null=True, blank=True, db_index=True)
     refunded_at = models.DateTimeField(null=True, blank=True)
@@ -199,7 +219,43 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
 
     @property
     def total_paise(self) -> int:
-        """What the resident is actually charged, tip included (Module 8.4)."""
+        """What the resident is actually charged — tip and platform fee included.
+
+        The fee rides *on top of* the amount rather than being taken out of it,
+        so the worker's figure never moves because Sathify changed its pricing.
+        Zero today (Module 8.7), which is why adding it here changes nothing yet.
+        """
+        return self.amount_paise + self.tip_paise + self.platform_fee_paise
+
+    @property
+    def is_overdue(self) -> bool:
+        """Past its due date and still unsettled.
+
+        A refunded or cancelled payment is never overdue — there is nothing
+        outstanding to be late with.
+        """
+        if self.due_at is None:
+            return False
+        if self.status in {
+            PaymentStatus.PAID,
+            PaymentStatus.REFUNDED,
+            PaymentStatus.CANCELLED,
+        }:
+            return False
+        return self.due_at < timezone.now()
+
+    @property
+    def days_overdue(self) -> int:
+        return (timezone.now() - self.due_at).days if self.is_overdue else 0
+
+    @property
+    def worker_receives_paise(self) -> int:
+        """What reaches the worker. The number that must never quietly shrink.
+
+        Deliberately its own property rather than "total minus fee": a reader
+        checking whether a fee was taken out of somebody's wage should find one
+        expression that says it was not.
+        """
         return self.amount_paise + self.tip_paise
 
     @property
@@ -378,6 +434,127 @@ class ReplacementSplit(TimeStampedModel):
         """
         replacement = day_rate_paise * self.replacement_share_percent // 100
         return replacement, day_rate_paise - replacement
+
+
+class SubscriptionTier(models.TextChoices):
+    FREE = "free", _("Free")
+    STANDARD = "standard", _("Standard")
+    PLUS = "plus", _("Plus")
+
+
+#: What each tier unlocks. A table rather than per-tier ``if`` branches scattered
+#: through views, so "what does Standard actually get?" has exactly one answer.
+#:
+#: ``None`` means unlimited.
+TIER_LIMITS: dict[str, dict] = {
+    SubscriptionTier.FREE: {
+        "workers": 25,
+        "history_days": 30,
+        "admins": 1,
+        "reports": False,
+        "waives_booking_fee": False,
+    },
+    SubscriptionTier.STANDARD: {
+        "workers": None,
+        "history_days": 365,
+        "admins": 3,
+        "reports": True,
+        "waives_booking_fee": False,
+    },
+    SubscriptionTier.PLUS: {
+        "workers": None,
+        "history_days": 1095,
+        "admins": 10,
+        "reports": True,
+        "waives_booking_fee": True,
+    },
+}
+
+
+class SocietySubscription(TimeStampedModel):
+    """Module 8.7 — what a society is entitled to.
+
+    ---------------------------------------------------------------------------
+    THE FREE TIER IS NOT A TRIAL
+    ---------------------------------------------------------------------------
+    A society with no row is FREE, and FREE is a permanent, fully working state.
+    Every gate check, every attendance write, every complaint and every payment
+    keeps functioning when a subscription lapses; only the administrator's
+    reporting surface narrows.
+
+    That is a deliberate commercial choice as much as an ethical one. A society
+    will not move its attendance records onto a platform that can hold them
+    hostage, and the records are the thing that makes leaving hard later. But it
+    is also the plain answer to "should an unpaid invoice be able to stop a
+    worker getting through the gate?" — no, and the code should make that
+    difficult to get wrong rather than relying on nobody trying.
+    """
+
+    society = models.OneToOneField(
+        "societies.Society", on_delete=models.CASCADE, related_name="subscription"
+    )
+    tier = models.CharField(
+        max_length=20,
+        choices=SubscriptionTier.choices,
+        default=SubscriptionTier.FREE,
+        db_index=True,
+    )
+    #: Null on FREE, which never expires.
+    valid_until = models.DateField(null=True, blank=True)
+
+    #: Razorpay subscription id, once billing is automated. Blank while tiers are
+    #: sold by hand, which is deliberate — there is no self-serve checkout until
+    #: somebody has actually paid for one.
+    provider_reference = models.CharField(max_length=64, blank=True)
+    note = models.CharField(max_length=300, blank=True)
+
+    class Meta:
+        verbose_name = _("society subscription")
+
+    def __str__(self):
+        return f"{self.society} — {self.get_tier_display()}"
+
+    @property
+    def is_active(self) -> bool:
+        if self.tier == SubscriptionTier.FREE:
+            return True
+        return self.valid_until is not None and self.valid_until >= timezone.localdate()
+
+    @property
+    def effective_tier(self) -> str:
+        """A lapsed paid tier reads as FREE rather than as itself.
+
+        Everything downstream asks for this, never ``tier``, so an expiry cannot
+        be forgotten at a call site.
+        """
+        return self.tier if self.is_active else SubscriptionTier.FREE
+
+    @property
+    def limits(self) -> dict:
+        return TIER_LIMITS[self.effective_tier]
+
+    @property
+    def waives_booking_fee(self) -> bool:
+        return bool(self.limits["waives_booking_fee"])
+
+    @property
+    def worker_limit(self):
+        """``None`` means unlimited."""
+        return self.limits["workers"]
+
+    @property
+    def includes_reports(self) -> bool:
+        return bool(self.limits["reports"])
+
+    @classmethod
+    def for_society(cls, society) -> "SocietySubscription":
+        """The society's subscription, creating a FREE one on first ask.
+
+        Lazy rather than created alongside the society, so societies that
+        predate this module behave identically to new ones.
+        """
+        subscription, _created = cls.objects.get_or_create(society=society)
+        return subscription
 
 
 class DisputeReason(models.TextChoices):

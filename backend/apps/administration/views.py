@@ -406,15 +406,29 @@ class ComplaintListCreateView(generics.ListCreateAPIView):
         if error is not None:
             return error
 
-        complaint = services.raise_complaint(
-            raised_by=request.user,
-            society=request.user.society,
-            category=data["category"],
-            subject=data["subject"],
-            description=data["description"],
-            photo=data.get("photo"),
-            **target,
-        )
+        try:
+            complaint = services.raise_complaint(
+                raised_by=request.user,
+                society=request.user.society,
+                category=data["category"],
+                subject=data["subject"],
+                description=data["description"],
+                photo=data.get("photo"),
+                **target,
+            )
+        except Exception:  # noqa: BLE001 — any storage error, not just one library's
+            # Storing the evidence photo is the one step that leaves this
+            # process. A media backend that is down must not swallow somebody's
+            # complaint — least of all a safety one — so this is retryable
+            # rather than a bare 500.
+            logger.exception(
+                "Could not raise complaint for user %s", request.user.pk
+            )
+            return _error(
+                "storage_unavailable",
+                "We could not save that just now. Please try again in a moment.",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response(
             {

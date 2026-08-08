@@ -155,6 +155,36 @@ class WorkerProfile(TimeStampedModel):
     )
     rejection_reason = models.TextField(blank=True)
 
+    # --- Module 8.7: police verification badge ------------------------------
+    #
+    # A paid product (₹250), and the reason it is a *badge* and not a boost.
+    #
+    # The obvious thing to sell a worker is a better position in search results.
+    # Do not. ``apps/hiring/scoring.py`` is a trust score residents are told to
+    # read when deciding who enters their home; a paid position inside it makes
+    # the number advisory at best and dishonest at worst, and it inverts the
+    # platform's purpose by selling the top of the list to whoever can pay —
+    # which is exactly the wrong direction for the people this exists to lift.
+    #
+    # So what is sold is the *check*, and what is displayed is the fact of it,
+    # with a date. Nothing here is read by the scorer, and a test asserts that.
+    # If promoted placement is ever added it belongs in a post-sort step that
+    # reorders only within a worker's existing trust band — never as a term in
+    # WEIGHTS.
+    police_verified_at = models.DateField(
+        null=True,
+        blank=True,
+        help_text=_("When the police check was completed. Displayed with the badge."),
+    )
+    #: Badges expire. One with no end date is a claim, not a fact — a check run
+    #: four years ago says very little, and showing it undated implies otherwise.
+    police_verified_until = models.DateField(null=True, blank=True)
+    police_verification_reference = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text=_("The verifying agency's reference, so a badge can be audited."),
+    )
+
     class Meta:
         ordering = ["-trust_score", "-average_rating"]
         indexes = [
@@ -176,6 +206,21 @@ class WorkerProfile(TimeStampedModel):
     @property
     def latest_kyc(self):
         return self.kyc_documents.order_by("-created_at").first()
+
+    @property
+    def is_police_verified(self) -> bool:
+        """Whether the badge is live *now*. An expired check is not a badge.
+
+        Read by the profile serializer and nothing else. Deliberately absent
+        from ``apps/hiring/scoring.py``: this is something a resident can see
+        and weigh for themselves, not something that quietly moves a worker up
+        a list because they could afford ₹250.
+        """
+        if self.police_verified_at is None:
+            return False
+        if self.police_verified_until is None:
+            return False
+        return self.police_verified_until >= timezone.localdate()
 
     @property
     def is_searchable(self) -> bool:

@@ -282,19 +282,28 @@ class _SocietyPicker extends ConsumerWidget {
             }
             return ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 260),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: list.length,
-                itemBuilder: (context, index) {
-                  final society = list[index];
-                  return RadioListTile<int>(
-                    value: society.id,
-                    groupValue: selected?.id,
-                    title: Text(society.name),
-                    subtitle: Text(society.subtitle),
-                    onChanged: (_) => onSelected(society),
-                  );
+              // RadioGroup replaces the per-tile groupValue/onChanged pair,
+              // deprecated after Flutter 3.32. The selection now lives on the
+              // ancestor, which is also why each tile below carries only its
+              // own value.
+              child: RadioGroup<int>(
+                groupValue: selected?.id,
+                onChanged: (id) {
+                  if (id == null) return;
+                  onSelected(list.firstWhere((s) => s.id == id));
                 },
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: list.length,
+                  itemBuilder: (context, index) {
+                    final society = list[index];
+                    return RadioListTile<int>(
+                      value: society.id,
+                      title: Text(society.name),
+                      subtitle: Text(society.subtitle),
+                    );
+                  },
+                ),
               ),
             );
           },

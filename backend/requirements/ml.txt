@@ -17,6 +17,25 @@
 paddlepaddle==3.1.1
 paddleocr==3.1.1
 
+# paddleocr 3.1.1 declares `paddlex>=3.1.0` with **no upper bound**, so a fresh
+# install resolves whatever is newest — and 3.7.2 changed a constructor
+# signature paddleocr still calls positionally:
+#
+#     TypeError: PaddlePredictorOption.__init__() takes 1 positional argument
+#                but 2 were given
+#
+# The damage is quiet rather than loud. `PaddleOcrEngine.is_available()` only
+# checks that the module imports, so the engine reports itself ready, fails at
+# runtime on the first document, and `recognise()` silently falls through to
+# EasyOCR — exactly as designed. Every scan then gets served by the fallback,
+# accuracy drops to the fallback's, and nothing anywhere says so.
+#
+# UNVERIFIED: the bound below is the compatible minor line by inspection, not by
+# a clean reinstall. Confirm with `pip install -r requirements/ml.txt` in a fresh
+# environment and check `PaddleOcrEngine().run(...)` actually returns before
+# trusting it. See docs/manual-test-cases.md, OCR-07.
+paddlex>=3.1.0,<3.2
+
 # --- OCR: EasyOCR automatic fallback ----------------------------------------
 easyocr==1.7.2
 # torch is pulled in by easyocr; pinned here so the CPU build is explicit.

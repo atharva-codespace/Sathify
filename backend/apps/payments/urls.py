@@ -19,6 +19,15 @@ urlpatterns = [
     ),
     path("booking/", views.CreateBookingPaymentView.as_view(), name="pay-booking"),
 
+    # --- 8.7 Fees, subscription, tip settlement ------------------------------
+    path("fees/quote/", views.FeeQuoteView.as_view(), name="fee-quote"),
+    path(
+        "subscription/",
+        views.SocietySubscriptionView.as_view(),
+        name="society-subscription",
+    ),
+    path("tips/owed/", views.TipsOwedView.as_view(), name="tips-owed"),
+
     # --- 8.3 Summaries -------------------------------------------------------
     path("summary/", views.MonthlySummaryView.as_view(), name="summary"),
     path("summary/csv/", views.MonthlySummaryCsvView.as_view(), name="summary-csv"),

@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from apps.core.files import PhotoTooLarge, validate_photo
 from apps.payments.models import format_paise
 
-from .models import DEFAULT_GRACE_MINUTES, LeaveRequest, Reminder, TaskTiming
+from .models import (
+    DEFAULT_GRACE_MINUTES,
+    LeaveRequest,
+    Reminder,
+    TaskCompletion,
+    TaskTiming,
+)
 
 
 class ScheduleItemSerializer(serializers.Serializer):
@@ -47,6 +54,27 @@ class ScheduleItemSerializer(serializers.Serializer):
     cover_worker_name = serializers.CharField(read_only=True)
     is_cover = serializers.BooleanField(read_only=True)
     covering_for_name = serializers.CharField(read_only=True)
+
+    # --- 6.6 progress through the day's work --------------------------------
+    visit_status = serializers.CharField(read_only=True)
+    checked_in_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    completed_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    exit_confirmed_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    is_complete = serializers.BooleanField(read_only=True)
+    has_left = serializers.BooleanField(read_only=True)
+    completion_note = serializers.CharField(read_only=True)
+    completion_photo_url = serializers.CharField(read_only=True)
+
+    # --- 6.7 what the day is worth, and when the next one is ----------------
+    pay_paise = serializers.IntegerField(read_only=True)
+    pay_state = serializers.CharField(read_only=True)
+    pay_display = serializers.SerializerMethodField()
+    minutes_to_next = serializers.IntegerField(read_only=True)
+    next_visit_at = serializers.DateTimeField(read_only=True, allow_null=True)
+
+
+    def get_pay_display(self, obj) -> str:
+        return format_paise(obj.pay_paise)
 
 
 class ScheduleConflictPairSerializer(serializers.Serializer):
@@ -314,3 +342,69 @@ class ReplacementCandidateSerializer(serializers.Serializer):
     match_score = serializers.FloatField(read_only=True)
     match_percentage = serializers.IntegerField(read_only=True)
     components = serializers.ListField(read_only=True)
+
+
+# ---------------------------------------------------------------------------
+# 6.6 Task completion
+# ---------------------------------------------------------------------------
+
+
+class TaskCompletionSerializer(serializers.ModelSerializer):
+    """One day's work, marked done by the worker."""
+
+    worker_name = serializers.CharField(source="worker.user.get_full_name", read_only=True)
+    photo_url = serializers.ImageField(source="photo", read_only=True)
+
+    class Meta:
+        model = TaskCompletion
+        fields = [
+            "id",
+            "engagement",
+            "booking",
+            "worker",
+            "worker_name",
+            "visit_date",
+            "completed_at",
+            "note",
+            "photo_url",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class MarkTaskCompleteSerializer(serializers.Serializer):
+    """Module 6.6 — the worker says the day's work is done.
+
+    Exactly one of ``engagement`` or ``booking``. ``visit_date`` defaults to
+    today, because the overwhelmingly common case is somebody pressing the
+    button as they finish — but it is settable, so a worker who finishes at
+    00:10 can mark yesterday's visit rather than tomorrow's.
+
+    ``photo`` is optional and stays optional. Requiring proof would turn a flat
+    battery into an unpaid day.
+    """
+
+    engagement = serializers.IntegerField(required=False)
+    booking = serializers.IntegerField(required=False)
+    visit_date = serializers.DateField(required=False)
+    note = serializers.CharField(
+        required=False, allow_blank=True, default="", max_length=300
+    )
+    photo = serializers.ImageField(required=False, allow_null=True)
+
+    def validate_photo(self, uploaded):
+        # Bounded because the instance is 512 MB and Django buffers an
+        # upload in memory before it reaches storage.
+        if uploaded is None:
+            return uploaded
+        try:
+            return validate_photo(uploaded)
+        except PhotoTooLarge as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate(self, attrs):
+        if bool(attrs.get("engagement")) == bool(attrs.get("booking")):
+            raise serializers.ValidationError(
+                "Send exactly one of engagement or booking."
+            )
+        return attrs

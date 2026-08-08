@@ -47,6 +47,7 @@ from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -62,13 +63,15 @@ from apps.hiring.models import Engagement
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
 
-from . import gateway
+from . import fees, gateway
 from .models import (
     Payment,
     PaymentDispute,
     PaymentKind,
     PaymentStatus,
     ReplacementSplit,
+    SocietySubscription,
+    format_paise,
     rupees_to_paise,
 )
 from .serializers import (
@@ -76,6 +79,7 @@ from .serializers import (
     ConfirmCheckoutSerializer,
     CreateBookingPaymentSerializer,
     CreateEngagementPaymentSerializer,
+    FeeQuoteSerializer,
     MonthlySummarySerializer,
     PaymentDisputeSerializer,
     PaymentSerializer,
@@ -84,6 +88,8 @@ from .serializers import (
     ReplacementSplitSerializer,
     ResolveDisputeSerializer,
     SalaryBasisSerializer,
+    SocietySubscriptionSerializer,
+    TipOwedSerializer,
 )
 from .services import (
     AlreadyPaid,
@@ -874,5 +880,163 @@ class ResolveDisputeView(APIView):
             {
                 "dispute": PaymentDisputeSerializer(dispute).data,
                 "message": "Dispute closed.",
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8.7 Platform fees, subscription, and the tip settlement list
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(
+    tags=["Payments"],
+    summary="What a booking will cost, fee included",
+    parameters=[
+        OpenApiParameter("amount_paise", int, description="The worker's quoted price"),
+    ],
+)
+class FeeQuoteView(APIView):
+    """Module 8.7 - the figure shown *before* the resident confirms.
+
+    Exists so the confirmation screen renders a number the server calculated,
+    rather than reconstructing it from a rate the client would have to know and
+    keep in step. A fee discovered on the receipt is worse than a larger fee
+    disclosed up front.
+
+    Returns zeroes while fees are switched off, which is the current state - the
+    screen simply has nothing to show, and will have when the rate turns on.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = FeeQuoteSerializer
+
+    def get(self, request):
+        try:
+            amount = int(request.query_params.get("amount_paise", 0))
+        except (TypeError, ValueError):
+            return _error(
+                "validation_error",
+                "amount_paise must be a whole number of paise.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if amount < 0:
+            return _error(
+                "validation_error",
+                "amount_paise cannot be negative.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        society = getattr(request.user, "society", None)
+        return Response(
+            fees.quote(kind=PaymentKind.BOOKING, amount_paise=amount, society=society)
+        )
+
+
+@extend_schema(
+    tags=["Payments"],
+    summary="This society's subscription",
+    responses=SocietySubscriptionSerializer,
+)
+class SocietySubscriptionView(APIView):
+    """Module 8.7 - what the society is entitled to.
+
+    Read-only over the API. Tiers are sold and set by hand for now, from the
+    Django admin: there is deliberately no self-serve checkout until somebody
+    has actually paid for one.
+    """
+
+    permission_classes = [IsApprovedSocietyAdmin]
+    serializer_class = SocietySubscriptionSerializer
+
+    def get(self, request):
+        if request.user.society_id is None:
+            return _error(
+                "no_society",
+                "This account is not attached to a society.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        subscription = SocietySubscription.for_society(request.user.society)
+        return Response(SocietySubscriptionSerializer(subscription).data)
+
+
+@extend_schema(
+    tags=["Payments"],
+    summary="Tips owed to workers, for hand settlement",
+    responses=TipOwedSerializer(many=True),
+)
+class TipsOwedView(APIView):
+    """Module 8.7 - the interim tipping mechanism, and it is deliberately manual.
+
+    Routing a tip to a worker's own account needs Razorpay Route, which needs a
+    linked account with a bank account **and a PAN** per worker. Much of this
+    workforce has neither. Building the automated path first would mean tipping
+    only worked for the workers who least need it.
+
+    So: the resident's tip is collected with the payment as it already is, and
+    this endpoint gives the administrator the list to hand over in cash, with
+    receipt numbers so it can be reconciled afterwards. The ledger is identical
+    to what the automated path will read; only settlement changes.
+
+    Next step, documented rather than half-built: RazorpayX payouts to a UPI ID,
+    which needs no PAN and clears most of this population. See docs/monetisation.md.
+    """
+
+    permission_classes = [IsApprovedSocietyAdmin]
+    serializer_class = TipOwedSerializer
+
+    def get(self, request):
+        if request.user.society_id is None:
+            return _error(
+                "no_society",
+                "This account is not attached to a society.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Paid by the resident and therefore genuinely owed onward. An unpaid or
+        # failed payment owes the worker nothing, and listing it would have an
+        # administrator handing over money that never arrived.
+        rows = (
+            Payment.objects.filter(
+                society_id=request.user.society_id,
+                status=PaymentStatus.PAID,
+                tip_paise__gt=0,
+            )
+            .select_related("worker__user")
+            .order_by("worker_id", "-paid_at")
+        )
+
+        owed: dict[int, dict] = {}
+        for payment in rows:
+            entry = owed.setdefault(
+                payment.worker_id,
+                {
+                    "worker_id": payment.worker_id,
+                    "worker_name": payment.worker.user.get_full_name(),
+                    "worker_phone": payment.worker.user.phone_number,
+                    "tip_paise": 0,
+                    "payment_count": 0,
+                    "receipts": [],
+                },
+            )
+            entry["tip_paise"] += payment.tip_paise
+            entry["payment_count"] += 1
+            entry["receipts"].append(payment.receipt_number)
+
+        results = sorted(owed.values(), key=lambda row: -row["tip_paise"])
+        for row in results:
+            row["tip_display"] = format_paise(row["tip_paise"])
+
+        return Response(
+            {
+                "count": len(results),
+                "total_paise": sum(row["tip_paise"] for row in results),
+                "total_display": format_paise(
+                    sum(row["tip_paise"] for row in results)
+                ),
+                "settlement": "cash",
+                "results": results,
             }
         )

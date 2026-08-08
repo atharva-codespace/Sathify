@@ -16,6 +16,7 @@ from .models import (
     Payment,
     PaymentDispute,
     ReplacementSplit,
+    SocietySubscription,
     WebhookEvent,
     format_paise,
 )
@@ -138,3 +139,23 @@ class PaymentDisputeAdmin(admin.ModelAdmin):
     list_select_related = ("payment", "raised_by")
     raw_id_fields = ("payment", "raised_by", "resolved_by", "society")
     readonly_fields = ("created_at", "updated_at", "resolved_at", "resolved_by")
+
+
+@admin.register(SocietySubscription)
+class SocietySubscriptionAdmin(admin.ModelAdmin):
+    """Module 8.7 — tiers, sold and set by hand.
+
+    This *is* the checkout for now, deliberately: there is no self-serve
+    purchase flow until a society has actually paid for a tier, and building one
+    before that would be guessing at a funnel nobody has walked yet.
+    """
+
+    list_display = ("society", "tier", "valid_until", "is_active", "updated_at")
+    list_filter = ("tier",)
+    search_fields = ("society__name", "provider_reference")
+    autocomplete_fields = ("society",)
+    readonly_fields = ("created_at", "updated_at")
+
+    @admin.display(boolean=True, description="Active")
+    def is_active(self, obj):
+        return obj.is_active

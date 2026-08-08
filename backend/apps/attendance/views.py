@@ -39,11 +39,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Role
-from apps.accounts.permissions import IsGateStaff, IsSocietyAdmin, IsWorker
+from apps.accounts.permissions import (
+    IsGateStaff,
+    IsResident,
+    IsSocietyAdmin,
+    IsWorker,
+)
 from apps.societies.models import Gate
 from apps.workers.models import WorkerProfile
 
-from .models import AttendanceEvent, Decision, RegisterScan
+from .models import AttendanceEvent, Decision, Direction, RegisterScan
 from .serializers import (
     AttendanceEventSerializer,
     FaceCheckSerializer,
@@ -55,12 +60,14 @@ from .serializers import (
     RegisterScanSerializer,
     ScanLookupSerializer,
     ScanResultSerializer,
+    ResidentScanSerializer,
     SelfCheckInResultSerializer,
     SelfCheckInSerializer,
     SyncRequestSerializer,
     SyncResultSerializer,
 )
 from .services import (
+    NoEngagementWithWorker,
     SelfCheckInDisabled,
     UnknownPass,
     WrongSociety,
@@ -68,6 +75,7 @@ from .services import (
     gate_roster,
     look_up_pass,
     record_event,
+    resident_scan,
     run_face_check,
     self_check_in,
     sync_events,
@@ -610,4 +618,87 @@ class RegisterScanListCreateView(generics.ListCreateAPIView):
         serializer.save(
             society_id=self.request.user.society_id,
             uploaded_by=self.request.user,
+        )
+
+
+@extend_schema(
+    tags=["Attendance"],
+    summary="Resident scans a worker's printed card",
+    request=ResidentScanSerializer,
+    responses=AttendanceEventSerializer,
+)
+class ResidentScanView(APIView):
+    """Module 13.3 tier 2.5 - no guard, and no smartphone either.
+
+    The gap the other two fallbacks leave. Tier 2 needs the worker to own a
+    phone; tier 3 needs a guard with a paper register. This needs neither: the
+    credential is the same GatePass code printed on a laminated card, and the
+    scanner is the resident's own phone.
+
+    Constrained to a resident with a *live engagement* with that worker. A
+    household vouching for somebody they actually employ is the signal here;
+    without it this would just be a way for anyone with a camera to write
+    attendance rows.
+
+    Like every tier, it cannot deny. The worst outcome is PENDING_REVIEW.
+    """
+
+    permission_classes = [IsResident]
+    serializer_class = ResidentScanSerializer
+
+    def post(self, request):
+        from apps.societies.models import Resident
+
+        resident = Resident.objects.filter(user=request.user).select_related(
+            "user"
+        ).first()
+        if resident is None:
+            return _error(
+                "no_profile",
+                "Claim your flat before scanning a worker in.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if request.user.society_id is None:
+            return _error(
+                "no_society",
+                "You are not attached to a society.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ResidentScanSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            result = resident_scan(
+                event_id=data["id"],
+                code=data["code"],
+                resident=resident,
+                society=request.user.society,
+                direction=data["direction"],
+                occurred_at=data["occurred_at"],
+                latitude=data.get("latitude"),
+                longitude=data.get("longitude"),
+                accuracy_metres=data.get("accuracy_metres"),
+                device_id=data["device_id"],
+                was_offline=data["was_offline"],
+            )
+        except (UnknownPass, WrongSociety) as exc:
+            return _error(exc.code, str(exc), status.HTTP_404_NOT_FOUND)
+        except NoEngagementWithWorker as exc:
+            return _error(exc.code, str(exc), status.HTTP_403_FORBIDDEN)
+
+        return Response(
+            {
+                "event": AttendanceEventSerializer(result.event).data,
+                "created": result.created,
+                "needs_review": result.needs_review,
+                "message": (
+                    result.reason
+                    or f"{result.event.worker.user.get_full_name()} is recorded as "
+                    f"{'arrived' if data['direction'] == Direction.ENTRY else 'left'}."
+                ),
+            },
+            status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK,
         )

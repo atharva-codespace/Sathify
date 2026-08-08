@@ -36,6 +36,13 @@ db.sqlite3-journal
 backend/media/
 backend/staticfiles/
 
+# Test artefacts. The suite runs against a local database and writes uploads to
+# a scratch directory (config/settings/test.py) so it never touches the shared
+# Supabase instance — but neither belongs in the repository.
+backend/media_test/
+backend/db.test.sqlite3
+backend/db.scratch.sqlite3
+
 # Model weights downloaded at runtime by PaddleOCR / EasyOCR / DeepFace
 .paddleocr/
 .EasyOCR/

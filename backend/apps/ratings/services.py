@@ -305,11 +305,28 @@ def worker_trust_inputs(worker) -> WorkerTrustInputs:
     completed = Booking.objects.filter(
         worker=worker, status=BookingStatus.COMPLETED
     ).count()
+    # Leaving is not abandoning. Leaving *without warning* is.
+    #
+    # This is the whole enforcement mechanism for Module 4.6's notice period,
+    # and it is deliberately the only one: withholding earned wages from a
+    # worker who left early would be legally exposed under the Payment of Wages
+    # Act, would fall hardest on the people this platform exists to serve, and
+    # would be self-defeating — a worker who knows that leaving costs a week's
+    # pay does not give notice, she simply stops turning up, and the household
+    # gets *less* warning. So the cost of walking out is a factual mark that
+    # decays, and the cost of giving notice is nothing at all.
+    #
+    # ``notice_given_at`` is the test rather than whether the last working day
+    # was reached: the harm being measured is "the household got no warning",
+    # and notice is the warning. Somebody who gave notice and then also left
+    # early is a rarer and different failure, and conflating the two would
+    # penalise the behaviour this is meant to encourage.
     abandoned = Booking.objects.filter(
         worker=worker, status=BookingStatus.DECLINED
     ).count() + Engagement.objects.filter(
         worker=worker,
         status=EngagementStatus.TERMINATED,
+        notice_given_at__isnull=True,
         end_reason__in=[
             EngagementEndReason.WORKER_ENDED,
             EngagementEndReason.WORKER_LEFT_SOCIETY,
