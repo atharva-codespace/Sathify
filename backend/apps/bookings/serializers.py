@@ -86,6 +86,18 @@ class BookingSerializer(serializers.ModelSerializer):
     can_be_cancelled = serializers.BooleanField(read_only=True)
     end_time = serializers.TimeField(read_only=True)
     scheduled_start = serializers.DateTimeField(read_only=True)
+    is_paid = serializers.SerializerMethodField()
+
+    def get_is_paid(self, obj) -> bool:
+        """Whether a settled payment exists for this booking.
+
+        Lazily imported: Module 8 already references Module 5's ``Booking`` by
+        string FK precisely to avoid the reverse import this would otherwise
+        create at module load time.
+        """
+        from apps.payments.models import PaymentStatus
+
+        return obj.payments.filter(status=PaymentStatus.PAID).exists()
 
     class Meta:
         model = Booking
@@ -109,6 +121,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "status",
             "is_actionable",
             "can_be_cancelled",
+            "is_paid",
             "confirmed_at",
             "declined_at",
             "response_note",

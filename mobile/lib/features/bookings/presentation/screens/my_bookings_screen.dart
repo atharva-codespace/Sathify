@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../../core/errors/api_exception.dart';
+import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
+import '../../../payments/presentation/providers/payment_provider.dart';
 import '../../data/models/booking_models.dart';
 import '../providers/booking_provider.dart';
 import '../widgets/category_icon.dart';
@@ -136,6 +141,34 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
             .completeBooking(widget.booking.id),
         'Marked complete.',
       );
+
+  /// Opens (or resumes) the payment for a completed job, then hands off to
+  /// the payments screen to actually collect it — that screen already has the
+  /// tested Razorpay checkout flow, so this does not duplicate it.
+  ///
+  /// The server call is idempotent on the booking: tapping this twice, or
+  /// retrying after a poor connection, resumes the same payment rather than
+  /// opening a second one.
+  Future<void> _pay() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final router = GoRouter.of(context);
+    setState(() => _isBusy = true);
+
+    try {
+      await ref
+          .read(paymentRepositoryProvider)
+          .payBooking(bookingId: widget.booking.id);
+      if (!mounted) return;
+      invalidateBookings(ref);
+      invalidatePayments(ref);
+      setState(() => _isBusy = false);
+      unawaited(router.push(Routes.payments));
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      setState(() => _isBusy = false);
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
+    }
+  }
 
   /// Fetches the fee first and shows it, then cancels with that exact figure.
   ///
@@ -348,6 +381,18 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
           icon: Icons.task_alt_rounded,
           isLoading: _isBusy,
           onPressed: _complete,
+        ),
+      );
+    } else if (!widget.isWorker && booking.needsPayment) {
+      // Done and not yet paid. The server refuses payment before this status
+      // is reached — see payments.views.CreateBookingPaymentView — so this is
+      // the earliest point paying becomes possible, not a courtesy prompt.
+      buttons.add(
+        AppButton(
+          label: 'Pay ₹${booking.quotedPrice}',
+          icon: Icons.payments_outlined,
+          isLoading: _isBusy,
+          onPressed: _pay,
         ),
       );
     }

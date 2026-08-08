@@ -267,6 +267,54 @@ class TestMatching:
         )
         assert response.data["results"] == []
 
+    def test_an_emergency_category_matches_a_worker_who_never_opted_in(
+        self, authenticated_client, resident, resident_user,
+        worker, emergency_category, booking_date,
+    ):
+        """The exception: nobody pre-declares availability for an emergency
+        that has not happened yet, so silence is read as "yes" here instead."""
+        response = authenticated_client(resident_user).get(
+            reverse(self.URL), self.params(emergency_category, booking_date)
+        )
+        assert [row["id"] for row in response.data["results"]] == [worker.pk]
+
+    def test_an_emergency_category_still_excludes_an_explicit_no(
+        self, authenticated_client, resident, resident_user,
+        worker, emergency_category, booking_date,
+    ):
+        DayAvailability.objects.create(
+            worker=worker, date=booking_date, is_available=False
+        )
+
+        response = authenticated_client(resident_user).get(
+            reverse(self.URL), self.params(emergency_category, booking_date)
+        )
+        assert response.data["results"] == []
+
+    def test_an_emergency_category_still_honours_a_declared_window(
+        self, authenticated_client, resident, resident_user,
+        worker, emergency_category, booking_date,
+    ):
+        DayAvailability.objects.create(
+            worker=worker,
+            date=booking_date,
+            is_available=True,
+            start_time=dt.time(14, 0),
+            end_time=dt.time(18, 0),
+        )
+
+        client = authenticated_client(resident_user)
+        outside = client.get(
+            reverse(self.URL), self.params(emergency_category, booking_date)
+        )
+        inside = client.get(
+            reverse(self.URL),
+            self.params(emergency_category, booking_date, start_time="14:00"),
+        )
+
+        assert outside.data["results"] == []
+        assert len(inside.data["results"]) == 1
+
     def test_a_blocked_date_is_not_matched(
         self, authenticated_client, resident, resident_user,
         worker, cleaning_category, booking_date,
@@ -965,6 +1013,43 @@ class TestCompletion:
 
         response = authenticated_client(resident_user).post(self.url(booking.pk))
         assert response.status_code == 409
+
+    def test_a_freshly_completed_booking_is_not_marked_paid(
+        self, authenticated_client, resident, resident_user, worker, cleaning_category
+    ):
+        day, moment = hours_from_now(-3)
+        booking = make_booking(
+            resident, worker, cleaning_category, day,
+            start_time=moment, status=BookingStatus.CONFIRMED,
+        )
+
+        response = authenticated_client(resident_user).post(self.url(booking.pk))
+        assert response.data["booking"]["is_paid"] is False
+
+    def test_a_booking_with_a_settled_payment_is_marked_paid(
+        self, authenticated_client, resident, resident_user, worker, cleaning_category
+    ):
+        from apps.payments.models import Payment, PaymentKind, PaymentStatus
+
+        day, moment = hours_from_now(-3)
+        booking = make_booking(
+            resident, worker, cleaning_category, day,
+            start_time=moment, status=BookingStatus.COMPLETED,
+        )
+        Payment.objects.create(
+            society=booking.society,
+            resident=resident,
+            worker=worker,
+            booking=booking,
+            kind=PaymentKind.BOOKING,
+            amount_paise=booking.quoted_price * 100,
+            status=PaymentStatus.PAID,
+        )
+
+        response = authenticated_client(resident_user).get(
+            reverse("v1:bookings:booking-detail", args=[booking.pk])
+        )
+        assert response.data["is_paid"] is True
 
 
 class TestVisibilityAndExpiry:

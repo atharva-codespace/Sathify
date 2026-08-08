@@ -219,6 +219,7 @@ class Booking {
     this.responseNote = '',
     this.isActionable = false,
     this.canBeCancelled = false,
+    this.isPaid = false,
     this.cancellationFee = 0,
     this.cancelledBy = '',
     this.cancellationReason = '',
@@ -252,12 +253,18 @@ class Booking {
   final bool isActionable;
   final bool canBeCancelled;
 
+  /// Whether a settled payment already exists for this booking.
+  final bool isPaid;
+
   final int cancellationFee;
   final String cancelledBy;
   final String cancellationReason;
 
   bool get isPending => status == BookingStatus.pending;
   bool get isConfirmed => status == BookingStatus.confirmed;
+
+  /// Done, and nobody has settled the charge yet.
+  bool get needsPayment => status == BookingStatus.completed && !isPaid;
 
   /// Pending or confirmed — still occupies the worker's day.
   bool get isLive =>
@@ -304,6 +311,7 @@ class Booking {
         responseNote: json['response_note'] as String? ?? '',
         isActionable: json['is_actionable'] as bool? ?? false,
         canBeCancelled: json['can_be_cancelled'] as bool? ?? false,
+        isPaid: json['is_paid'] as bool? ?? false,
         cancellationFee: toDoubleOrZero(json['cancellation_fee']).round(),
         cancelledBy: json['cancelled_by'] as String? ?? '',
         cancellationReason: json['cancellation_reason'] as String? ?? '',

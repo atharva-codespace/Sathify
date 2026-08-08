@@ -314,11 +314,62 @@ class _EndReasonDialog extends StatelessWidget {
             'request to start again.',
           ),
           const SizedBox(height: 16),
+          const Text(
+            'Why are you ending it?',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          // Bordered and iconed rather than bare ListTiles: sitting next to a
+          // properly-styled "Cancel" button, plain text rows read as inert
+          // description, not as the two actions that actually end this — which
+          // is exactly what made "Cancel" look like the only option here.
           ..._reasons.map(
-            (reason) => ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(reason.label),
-              onTap: () => Navigator.of(context).pop(reason),
+            (reason) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Material(
+                color: AppColors.danger.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(10),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => Navigator.of(context).pop(reason),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: AppColors.danger.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.stop_circle_outlined,
+                          size: 18,
+                          color: AppColors.danger,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            reason.label,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.danger,
+                            ),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.chevron_right,
+                          size: 18,
+                          color: AppColors.danger,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ],

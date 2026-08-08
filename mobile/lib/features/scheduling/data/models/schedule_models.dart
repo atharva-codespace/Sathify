@@ -90,6 +90,15 @@ class ScheduleItem {
 
   String get startTimeLabel => formatScheduleTime(startTime);
 
+  /// What should actually be shown to the user: the resident's expected
+  /// arrival where Module 6.2 timing has been set, falling back to the
+  /// engagement's own start time otherwise. [startTime] itself never changes
+  /// when a resident edits the timing sheet — it stays the raw engagement
+  /// slot, used for sorting and conflict checks — so any card that shows a
+  /// clock time to a person should read this instead of [startTimeLabel].
+  String get displayTimeLabel =>
+      formatScheduleTime(expectedArrival ?? startTime);
+
   String get timeRangeLabel {
     final end = formatScheduleTime(endTime);
     return end.isEmpty ? startTimeLabel : '$startTimeLabel – $end';
