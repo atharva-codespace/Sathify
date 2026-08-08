@@ -239,10 +239,23 @@ class KycUploadView(APIView):
             ip_address=_client_ip(request),
         )
 
-        kyc = KycDocument.objects.create(
-            worker=profile,
-            document_image=serializer.validated_data["document"],
-        )
+        # Storing the file is the one step here that talks to something outside
+        # this process. A misconfigured or unreachable media backend used to
+        # surface as a bare 500; the worker gets a retryable message instead,
+        # and the traceback goes to the log where it can be fixed.
+        try:
+            kyc = KycDocument.objects.create(
+                worker=profile,
+                document_image=serializer.validated_data["document"],
+            )
+        except Exception:  # noqa: BLE001 — any storage error, not just one library's
+            logger.exception("Could not store KYC document for worker %s", profile.pk)
+            return _error(
+                "storage_unavailable",
+                "We could not save your document just now. Please try again in a moment.",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         kyc = process_kyc_document(kyc, form_data=serializer.form_data())
 
         # Module 3.4 — a confirmed minor is rejected immediately rather than

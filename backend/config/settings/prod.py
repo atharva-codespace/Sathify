@@ -13,6 +13,8 @@ FREE-TIER REALITY CHECK (see docs/free-tier-constraints.md):
     does not fit. OCR and face verification run out-of-process; see the docs.
 """
 
+import warnings
+
 from .base import *  # noqa: F401,F403
 from .base import env
 
@@ -41,18 +43,41 @@ X_FRAME_OPTIONS = "DENY"
 # Render's filesystem is EPHEMERAL: anything written to MEDIA_ROOT disappears on
 # every deploy, restart, and wake-from-sleep. Worker profile photos and Aadhaar
 # uploads must therefore live in Supabase Storage (S3-compatible), not on disk.
-STORAGES["default"] = {  # noqa: F405
-    "BACKEND": "storages.backends.s3.S3Storage",
-    "OPTIONS": {
-        "bucket_name": env("SUPABASE_STORAGE_BUCKET", default="sathify-media"),
-        "endpoint_url": env("SUPABASE_STORAGE_ENDPOINT", default=""),
-        "access_key": env("SUPABASE_STORAGE_ACCESS_KEY", default=""),
-        "secret_key": env("SUPABASE_STORAGE_SECRET_KEY", default=""),
-        "region_name": env("SUPABASE_STORAGE_REGION", default="ap-south-1"),
-        "default_acl": "private",   # KYC documents are never publicly readable
-        "querystring_auth": True,   # served via short-lived signed URLs
-        "querystring_expire": 300,
-        "file_overwrite": False,
-        "signature_version": "s3v4",
-    },
-}
+#
+# The three credentials below are `sync: false` in render.yaml, so they only
+# exist once somebody pastes them into the Render dashboard. Switching to the S3
+# backend *before* that happens does not fail at boot — it fails on the first
+# upload, deep inside boto3, as a 500 with no explanation for the worker holding
+# their Aadhaar card up to the camera. So the switch is conditional: configured
+# means Supabase, unconfigured means the ephemeral disk, and either way uploads
+# work.
+_STORAGE_ENDPOINT = env("SUPABASE_STORAGE_ENDPOINT", default="")
+_STORAGE_ACCESS_KEY = env("SUPABASE_STORAGE_ACCESS_KEY", default="")
+_STORAGE_SECRET_KEY = env("SUPABASE_STORAGE_SECRET_KEY", default="")
+
+if _STORAGE_ENDPOINT and _STORAGE_ACCESS_KEY and _STORAGE_SECRET_KEY:
+    STORAGES["default"] = {  # noqa: F405
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": env("SUPABASE_STORAGE_BUCKET", default="sathify-media"),
+            "endpoint_url": _STORAGE_ENDPOINT,
+            "access_key": _STORAGE_ACCESS_KEY,
+            "secret_key": _STORAGE_SECRET_KEY,
+            "region_name": env("SUPABASE_STORAGE_REGION", default="ap-south-1"),
+            "default_acl": "private",   # KYC documents are never publicly readable
+            "querystring_auth": True,   # served via short-lived signed URLs
+            "querystring_expire": 300,
+            "file_overwrite": False,
+            "signature_version": "s3v4",
+        },
+    }
+else:
+    # Loud, because this is a real (if survivable) degradation: every uploaded
+    # document is lost on the next deploy or wake-from-sleep.
+    warnings.warn(
+        "SUPABASE_STORAGE_ENDPOINT / _ACCESS_KEY / _SECRET_KEY are not all set, "
+        "so uploaded media is being written to Render's EPHEMERAL disk and will "
+        "be lost on the next restart. Set all three in the Render dashboard.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
