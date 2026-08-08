@@ -314,6 +314,76 @@ class TestFinalPay:
         assert basis.expected_visits > 0
 
 
+class TestNoticeProtectsTheTrustScore:
+    """The notice period's *only* enforcement mechanism.
+
+    Deliberately not wage withholding — that is legally exposed under the
+    Payment of Wages Act, lands hardest on the workers this platform serves,
+    and backfires: somebody who knows leaving costs a week's pay does not give
+    notice, they stop turning up, and the household gets less warning. So the
+    cost of walking out is a mark that decays, and the cost of doing it
+    properly is nothing.
+    """
+
+    def abandoned_count(self, worker):
+        from apps.ratings.services import worker_trust_inputs
+
+        return worker_trust_inputs(worker).abandoned_jobs
+
+    def test_walking_out_counts_as_abandonment(self, engagement, worker):
+        engagement.terminate(reason=EngagementEndReason.WORKER_ENDED)
+
+        assert self.abandoned_count(worker) == 1
+
+    def test_serving_notice_costs_the_worker_nothing(
+        self, engagement, worker, worker_user
+    ):
+        """The one that makes the rule work.
+
+        Before this, a worker who gave ten days' notice and worked every one of
+        them was scored identically to one who vanished overnight — which
+        removes any reason to give notice at all.
+        """
+        give_notice(engagement, by=worker_user, reason=EngagementEndReason.WORKER_ENDED)
+        Engagement.objects.filter(pk=engagement.pk).update(
+            last_working_day=timezone.localdate() - dt.timedelta(days=1)
+        )
+        close_engagements_past_notice()
+
+        engagement.refresh_from_db()
+        assert engagement.status == EngagementStatus.TERMINATED
+        assert self.abandoned_count(worker) == 0
+
+    def test_the_household_ending_it_never_marks_the_worker(
+        self, engagement, worker, resident_user
+    ):
+        """A resident letting somebody go says nothing about the worker."""
+        give_notice(
+            engagement, by=resident_user, reason=EngagementEndReason.RESIDENT_ENDED
+        )
+        Engagement.objects.filter(pk=engagement.pk).update(
+            last_working_day=timezone.localdate() - dt.timedelta(days=1)
+        )
+        close_engagements_past_notice()
+
+        assert self.abandoned_count(worker) == 0
+
+    def test_no_wages_are_withheld_from_somebody_who_walked_out(
+        self, engagement, worker
+    ):
+        """The mark is the whole penalty. Pay is untouched.
+
+        If a deduction ever appears on this path, the rule has become a fine on
+        the poorest people using the platform.
+        """
+        from apps.payments.models import Payment
+
+        engagement.terminate(reason=EngagementEndReason.WORKER_ENDED)
+
+        assert self.abandoned_count(worker) == 1
+        assert not Payment.objects.filter(worker=worker).exists()
+
+
 class TestNoticeApi:
     def url(self, engagement_id):
         return reverse("v1:hiring:engagement-notice", args=[engagement_id])

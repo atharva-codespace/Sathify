@@ -163,7 +163,8 @@ class _RaiseComplaintScreenState extends ConsumerState<RaiseComplaintScreen> {
             const Text('What is this about?'),
             const SizedBox(height: 8),
             DropdownButtonFormField<ComplaintCategory>(
-              value: _category,
+              // `initialValue`, not `value` — deprecated after Flutter 3.33.
+              initialValue: _category,
               items: [
                 for (final category in ComplaintCategory.values)
                   DropdownMenuItem(

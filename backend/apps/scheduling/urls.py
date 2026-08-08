@@ -35,6 +35,13 @@ urlpatterns = [
         name="reminder-delivered",
     ),
 
+    # --- 6.6 Task completion -------------------------------------------------
+    path(
+        "visits/complete/",
+        views.MarkTaskCompleteView.as_view(),
+        name="mark-task-complete",
+    ),
+
     # --- 6.5 Urgent leave ("chutti") ----------------------------------------
     path("leave/", views.LeaveListCreateView.as_view(), name="leave-list"),
     path(

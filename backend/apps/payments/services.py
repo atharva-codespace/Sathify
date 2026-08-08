@@ -36,6 +36,8 @@ from django.utils import timezone
 from apps.attendance.models import AttendanceEvent, Decision, Direction
 from apps.scheduling.schedule import worker_schedule
 
+from .fees import platform_fee_paise
+
 from . import gateway
 from .models import (
     Payment,
@@ -210,6 +212,66 @@ def salary_basis(engagement, *, period_start: dt.date, period_end: dt.date) -> S
 
 
 # ---------------------------------------------------------------------------
+# 8.8 When a payment is due
+# ---------------------------------------------------------------------------
+
+
+def payment_due_at(
+    *,
+    kind: str,
+    engagement=None,
+    booking=None,
+    period_end: dt.date | None = None,
+) -> dt.datetime | None:
+    """When a payment is owed. Derived from fields that already exist.
+
+    ---------------------------------------------------------------------------
+    WHY THIS IS NOT DERIVED FROM ``daily_rate_paise``
+    ---------------------------------------------------------------------------
+    The obvious place to look for a billing cycle is the thing that already
+    divides a monthly rate — but ``daily_rate_paise`` divides by
+    ``len(days_of_week) * 4``. That is a *rate* calculation: it implies a
+    four-week month and nothing else. No anchor date, no billing day, no cycle
+    start. There is no due date hiding in it to reuse, and inventing one there
+    would put a billing rule inside a function whose job is arithmetic.
+
+    So the due date comes from whichever field already says when the work is:
+
+    * a **one-day booking** is due on the day it is served — the resident is
+      paying for a thing that happens on a date the booking already carries;
+    * a **salary for a period** is due at the end of that period, because it
+      pays for work already done, and asking for it up front would have a
+      household paying for visits nobody has made yet;
+    * an **engagement with no period** — which is the case the brief names,
+      "resident books a service" — falls back to the engagement's start date.
+
+    Returns ``None`` when nothing implies a date, rather than guessing. A blank
+    due date is honest; a wrong one is a demand for money on a day nobody agreed.
+    """
+    if booking is not None and getattr(booking, "scheduled_date", None):
+        start = getattr(booking, "start_time", None) or dt.time(0, 0)
+        return _as_aware(dt.datetime.combine(booking.scheduled_date, start))
+
+    if period_end is not None:
+        # End of the last day of the period, not its midnight start — a salary
+        # for a month ending on the 31st is not overdue at 00:00 on the 31st.
+        return _as_aware(dt.datetime.combine(period_end, dt.time(23, 59, 59)))
+
+    if engagement is not None and getattr(engagement, "started_on", None):
+        start = getattr(engagement, "start_time", None) or dt.time(0, 0)
+        return _as_aware(dt.datetime.combine(engagement.started_on, start))
+
+    return None
+
+
+def _as_aware(naive: dt.datetime) -> dt.datetime:
+    """Attach the current timezone. Payments are compared against ``now()``."""
+    if timezone.is_aware(naive):
+        return naive
+    return timezone.make_aware(naive, timezone.get_current_timezone())
+
+
+# ---------------------------------------------------------------------------
 # 8.1 / 8.2 Creating a payment
 # ---------------------------------------------------------------------------
 
@@ -227,11 +289,26 @@ def create_payment(
     booking=None,
     period_start: dt.date | None = None,
     period_end: dt.date | None = None,
+    due_at: dt.datetime | None = None,
     note: str = "",
 ) -> Payment:
     """Open a ledger row. No money moves yet — see :func:`open_order`."""
     if amount_paise <= 0:
         raise NothingToPay("A payment must be for more than zero.")
+
+    # Module 8.7 — frozen here, not derived on read, so a later rate change
+    # cannot rewrite what this receipt said at the time. Zero on everything
+    # today; see apps/payments/fees.py.
+    fee = platform_fee_paise(kind=kind, amount_paise=amount_paise, society=society)
+
+    # Module 8.8 — an explicit due date, derived rather than invented. A
+    # caller may pass one (the sample_payment command does, to make a payment
+    # due right now); otherwise it comes from whichever field already says
+    # when the work is.
+    if due_at is None:
+        due_at = payment_due_at(
+            kind=kind, engagement=engagement, booking=booking, period_end=period_end
+        )
 
     payment = Payment.objects.create(
         society=society,
@@ -242,8 +319,10 @@ def create_payment(
         kind=kind,
         amount_paise=amount_paise,
         tip_paise=max(0, tip_paise),
+        platform_fee_paise=fee,
         period_start=period_start,
         period_end=period_end,
+        due_at=due_at,
         note=note,
     )
     logger.info(
@@ -468,6 +547,7 @@ __all__ = [
     "create_payment",
     "daily_rate_paise",
     "open_order",
+    "payment_due_at",
     "record_webhook",
     "salary_basis",
     "split_for_replacement",

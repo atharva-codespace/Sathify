@@ -59,12 +59,30 @@ class PaddleOcrEngine:
         self._reader = None
 
     def is_available(self) -> bool:
+        """Whether this engine can actually serve a document.
+
+        Importing is not enough, and assuming it was hid a real failure for a
+        while: paddleocr pulls in ``paddlex`` unbounded, and a newer paddlex
+        changed a constructor signature paddleocr still calls positionally. The
+        module imported perfectly and then raised ``TypeError`` on the first
+        real document, so every scan quietly fell through to EasyOCR while this
+        method kept reporting the primary engine as ready.
+
+        Constructing the reader is the honest test, and it is cached, so the
+        cost is paid once per process either way.
+        """
         try:
             import paddleocr  # noqa: F401
-
-            return True
         except ImportError:
             return False
+
+        try:
+            self._get_reader()
+        except Exception as exc:  # noqa: BLE001 — a probe must never raise
+            logger.warning("PaddleOCR is installed but unusable: %s", exc)
+            return False
+
+        return True
 
     def _get_reader(self):
         """Build the reader once and reuse it.

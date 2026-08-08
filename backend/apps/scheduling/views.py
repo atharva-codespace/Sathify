@@ -30,6 +30,7 @@ from django.db.models import Q
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -43,9 +44,12 @@ from apps.hiring.models import Engagement
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
 
-from .models import LeaveRequest, Reminder, TaskTiming
+from apps.payments.models import format_paise
+
+from .models import LeaveRequest, Reminder, TaskTiming, VisitStatus
 from .schedule import (
     MAX_SCHEDULE_DAYS,
+    PAY_UNRESOLVED,
     ScheduleRangeTooWide,
     find_overlaps,
     resident_schedule,
@@ -58,18 +62,21 @@ from .serializers import (
     LeaveCreateSerializer,
     LeaveRequestSerializer,
     LeaveResponseSerializer,
+    MarkTaskCompleteSerializer,
     ReminderDeliverySerializer,
     ReminderSerializer,
     ReplacementAssignSerializer,
     ReplacementCandidateSerializer,
     ScheduleConflictPairSerializer,
     ScheduleItemSerializer,
+    TaskCompletionSerializer,
     TaskTimingSerializer,
     TaskTimingWriteSerializer,
 )
 from .services import (
     DuplicateLeave,
     LeaveError,
+    mark_task_complete,
     assign_replacement,
     check_conflict,
     close_lapsed_leave,
@@ -107,6 +114,47 @@ def _requested_range(request, *, default_days: int = 7):
         else start_date + dt.timedelta(days=default_days - 1)
     )
     return start_date, end_date
+
+
+#: How far past today the dashboard looks, purely so the last visit of the day
+#: can say when the next one is. Only today's items are ever returned.
+NEXT_VISIT_HORIZON_DAYS = 7
+
+
+def _today_summary(items) -> dict:
+    """Module 6.7 — the counts a dashboard needs above the list.
+
+    Aimed at whoever is tracking more than one worker: a household with a maid
+    and a cook, or an administrator looking at a society. One person with one
+    visit can read the list; four people with eight visits cannot.
+
+    ``needs_attention`` is the number of visits whose pay nobody has decided on
+    yet — days that finished without being marked complete. It is surfaced
+    rather than resolved; see ``PAY_UNRESOLVED``.
+    """
+    completed = [i for i in items if i.visit_status == VisitStatus.COMPLETE]
+    in_progress = [i for i in items if i.visit_status == VisitStatus.IN_PROGRESS]
+
+    # The next visit is whichever item is soonest away, across every worker on
+    # the list — that is the question "when is somebody next coming?".
+    upcoming = [i for i in items if i.minutes_to_next >= 0]
+    soonest = min(upcoming, key=lambda i: i.minutes_to_next) if upcoming else None
+
+    return {
+        "total": len(items),
+        "completed": len(completed),
+        "in_progress": len(in_progress),
+        "pending": len(items) - len(completed) - len(in_progress),
+        "on_leave": len([i for i in items if i.on_leave]),
+        # Only pay that is actually earned. A day still in progress is not
+        # money owed, and showing it as such would have a household believing
+        # they are behind on a payment nobody is asking for yet.
+        "earned_paise": sum(i.pay_paise for i in completed),
+        "earned_display": format_paise(sum(i.pay_paise for i in completed)),
+        "needs_attention": len([i for i in items if i.pay_state == PAY_UNRESOLVED]),
+        "next_visit_at": soonest.next_visit_at if soonest else None,
+        "minutes_to_next": soonest.minutes_to_next if soonest else -1,
+    }
 
 
 def _schedule_for_caller(user, start: dt.date, end: dt.date):
@@ -149,7 +197,13 @@ class MyTodayView(APIView):
 
     def get(self, request):
         today = timezone.localdate()
-        items = _schedule_for_caller(request.user, today, today)
+
+        # Module 6.7 — the window runs a week past today so "time until the next
+        # visit" can answer for the last visit of the day. Only today's items
+        # are returned; the rest exist to give that field something to point at.
+        horizon = today + dt.timedelta(days=NEXT_VISIT_HORIZON_DAYS)
+        window = _schedule_for_caller(request.user, today, horizon)
+        items = [item for item in window if item.date == today]
 
         # Module 6.4 — generation is lazy for the same reason expiry is: there
         # is no scheduler on the free tier. Opening the app is the trigger.
@@ -162,6 +216,7 @@ class MyTodayView(APIView):
             {
                 "date": today,
                 "count": len(items),
+                "summary": _today_summary(items),
                 "results": ScheduleItemSerializer(items, many=True).data,
             }
         )
@@ -754,3 +809,102 @@ class WithdrawLeaveView(APIView):
             return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
 
         return Response({"leave": LeaveRequestSerializer(leave).data})
+
+
+# ---------------------------------------------------------------------------
+# 6.6 Marking a day's work done
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(
+    tags=["Scheduling"],
+    summary="Mark today's task complete",
+    request=MarkTaskCompleteSerializer,
+    responses=TaskCompletionSerializer,
+)
+class MarkTaskCompleteView(APIView):
+    """Module 6.6 - the worker says the day's work is done.
+
+    The one new state in the hire -> work -> completion -> exit flow. Arrival
+    and departure both already exist as gate events (Module 7) and are read
+    from there rather than duplicated; a second check-in mechanism would
+    eventually disagree with the first about whether somebody was at work.
+
+    Not conditional on a check-in having been recorded. See
+    ``services.mark_task_complete`` for why.
+    """
+
+    permission_classes = [IsEngagementParty]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    serializer_class = MarkTaskCompleteSerializer
+
+    def post(self, request):
+        profile = WorkerProfile.objects.filter(user=request.user).first()
+        if profile is None:
+            return _error(
+                "not_a_worker",
+                "Only the worker on a visit can mark it complete.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = MarkTaskCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        visit_date = data.get("visit_date") or timezone.localdate()
+
+        engagement = booking = None
+        if data.get("engagement"):
+            engagement = Engagement.objects.filter(
+                pk=data["engagement"], worker=profile
+            ).select_related("resident__user", "society").first()
+            if engagement is None:
+                return _error(
+                    "not_found",
+                    "That engagement was not found, or is not yours.",
+                    status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            from apps.bookings.models import Booking
+
+            booking = Booking.objects.filter(
+                pk=data["booking"], worker=profile
+            ).select_related("resident__user", "society").first()
+            if booking is None:
+                return _error(
+                    "not_found",
+                    "That booking was not found, or is not yours.",
+                    status.HTTP_404_NOT_FOUND,
+                )
+
+        try:
+            completion = mark_task_complete(
+                worker=profile,
+                visit_date=visit_date,
+                engagement=engagement,
+                booking=booking,
+                note=data["note"],
+                photo=data.get("photo"),
+            )
+        except LeaveError as exc:
+            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+        except Exception:  # noqa: BLE001 — any storage error, not just one library's
+            # Storing the photo is the one step that leaves this process. A
+            # media backend that is down must not cost a worker the record of a
+            # day she worked, so this is retryable rather than a bare 500 —
+            # same treatment as the KYC and gate-photo uploads.
+            logger.exception(
+                "Could not store completion photo for worker %s", profile.pk
+            )
+            return _error(
+                "storage_unavailable",
+                "We could not save that photo just now. Please try again in a moment.",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "completion": TaskCompletionSerializer(completion).data,
+                "message": "Marked complete. The household has been told.",
+            },
+            status=status.HTTP_201_CREATED,
+        )

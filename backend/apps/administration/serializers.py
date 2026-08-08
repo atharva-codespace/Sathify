@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from apps.core.files import PhotoTooLarge, validate_photo
+
 from .models import (
     Complaint,
     ComplaintCategory,
@@ -153,6 +155,14 @@ class RaiseComplaintSerializer(serializers.Serializer):
     against_resident = serializers.IntegerField(required=False, allow_null=True)
 
     photo = serializers.ImageField(required=False, allow_null=True)
+
+    def validate_photo(self, uploaded):
+        if uploaded is None:
+            return uploaded
+        try:
+            return validate_photo(uploaded)
+        except PhotoTooLarge as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
     def validate(self, attrs):
         if attrs.get("against_worker") and attrs.get("against_resident"):

@@ -325,3 +325,30 @@ class RegisterScanSerializer(serializers.ModelSerializer):
             "id", "uploaded_by", "uploaded_by_name", "gate_name",
             "transcribed", "transcribed_at", "created_at",
         ]
+
+
+class ResidentScanSerializer(serializers.Serializer):
+    """Module 13.3 tier 2.5 - a resident scanning the worker's printed card.
+
+    Identical in shape to :class:`SelfCheckInSerializer` plus the scanned
+    ``code``, because it is the same queueable event recorded by a different
+    person. Position stays optional for the same reason: a phone with location
+    off still produces a usable record, it just goes to an administrator rather
+    than standing on its own.
+    """
+
+    id = serializers.UUIDField(default=uuid.uuid4)
+    code = serializers.CharField(max_length=128)
+    direction = serializers.ChoiceField(
+        choices=Direction.choices, default=Direction.ENTRY
+    )
+    occurred_at = serializers.DateTimeField()
+
+    latitude = serializers.FloatField(required=False, allow_null=True)
+    longitude = serializers.FloatField(required=False, allow_null=True)
+    accuracy_metres = serializers.FloatField(required=False, allow_null=True)
+
+    device_id = serializers.CharField(
+        required=False, allow_blank=True, default="", max_length=64
+    )
+    was_offline = serializers.BooleanField(default=False)

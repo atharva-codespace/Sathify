@@ -27,6 +27,12 @@ urlpatterns = [
 
     # --- 13.3 Tier 2: worker self check-in ----------------------------------
     path("self-checkin/", views.SelfCheckInView.as_view(), name="self-checkin"),
+    # --- 13.3 tier 2.5: no guard, and no smartphone either ------------------
+    path(
+        "resident-scan/",
+        views.ResidentScanView.as_view(),
+        name="resident-scan",
+    ),
 
     # --- 7.5 / 13.3 Tier 3: register digitisation ---------------------------
     path("registers/", views.RegisterScanListCreateView.as_view(), name="register-list"),

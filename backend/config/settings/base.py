@@ -376,6 +376,16 @@ RAZORPAY_SETTINGS = {
     "CURRENCY": "INR",
 }
 
+# --- Module 8.7: platform fees ----------------------------------------------
+# Off. The column, the calculation and the receipt line all ship before the
+# price does, so that turning pricing on is a one-line change rather than a
+# schema change made under deadline pressure on launch day.
+#
+# The intended rate lives in `apps/payments/fees.py`; this decides whether it is
+# charged. Flipping it to True starts charging residents real money on one-day
+# bookings — never on a recurring salary, which is a wage transfer.
+PLATFORM_FEES_ENABLED = env.bool("PLATFORM_FEES_ENABLED", default=False)
+
 # --- Module 10: Notifications (FCM) -----------------------------------------
 FCM_SETTINGS = {
     "ENABLED": env.bool("FCM_ENABLED", default=False),

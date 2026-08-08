@@ -288,14 +288,21 @@ class _DisputeSheetState extends State<_DisputeSheet> {
               style: TextStyle(color: AppColors.textSecondary),
             ),
             const SizedBox(height: 16),
-            ...DisputeReason.values.map(
-              (reason) => RadioListTile<DisputeReason>(
-                contentPadding: EdgeInsets.zero,
-                value: reason,
-                groupValue: _reason,
-                onChanged: (value) =>
-                    setState(() => _reason = value ?? _reason),
-                title: Text(reason.label),
+            // RadioGroup owns the selection; the tiles carry only their value.
+            // Replaces the groupValue/onChanged pair deprecated after 3.32.
+            RadioGroup<DisputeReason>(
+              groupValue: _reason,
+              onChanged: (value) => setState(() => _reason = value ?? _reason),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final reason in DisputeReason.values)
+                    RadioListTile<DisputeReason>(
+                      contentPadding: EdgeInsets.zero,
+                      value: reason,
+                      title: Text(reason.label),
+                    ),
+                ],
               ),
             ),
             const SizedBox(height: 8),

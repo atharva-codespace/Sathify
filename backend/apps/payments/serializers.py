@@ -20,6 +20,7 @@ from .models import (
     PaymentDispute,
     PaymentKind,
     ReplacementSplit,
+    SocietySubscription,
     format_paise,
 )
 
@@ -36,6 +37,9 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     total_paise = serializers.IntegerField(read_only=True)
     net_paise = serializers.IntegerField(read_only=True)
+    worker_receives_paise = serializers.IntegerField(read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+    days_overdue = serializers.IntegerField(read_only=True)
     amount_display = serializers.SerializerMethodField()
     total_display = serializers.SerializerMethodField()
 
@@ -56,13 +60,18 @@ class PaymentSerializer(serializers.ModelSerializer):
             "booking",
             "amount_paise",
             "tip_paise",
+            "platform_fee_paise",
             "refunded_paise",
             "total_paise",
             "net_paise",
+            "worker_receives_paise",
             "amount_display",
             "total_display",
             "period_start",
             "period_end",
+            "due_at",
+            "is_overdue",
+            "days_overdue",
             "note",
             "failure_reason",
             "paid_at",
@@ -275,3 +284,69 @@ class ReceiptSerializer(serializers.Serializer):
     net_paise = serializers.IntegerField(read_only=True)
     net_display = serializers.CharField(read_only=True)
     gateway_payment_id = serializers.CharField(read_only=True, allow_blank=True)
+
+
+# ---------------------------------------------------------------------------
+# 8.7 Fees, subscription, tip settlement
+# ---------------------------------------------------------------------------
+
+
+class FeeQuoteSerializer(serializers.Serializer):
+    """What a booking costs, broken out, before the resident confirms."""
+
+    amount_paise = serializers.IntegerField(read_only=True)
+    platform_fee_paise = serializers.IntegerField(read_only=True)
+    total_paise = serializers.IntegerField(read_only=True)
+
+    #: False while fees are switched off, so the screen can stay silent rather
+    #: than render a "₹0.00 platform fee" line nobody needs to read.
+    fee_applies = serializers.BooleanField(read_only=True)
+
+
+class SocietySubscriptionSerializer(serializers.ModelSerializer):
+    """A society's entitlements.
+
+    ``effective_tier`` rather than ``tier`` is what callers should read: a
+    lapsed paid tier reports as FREE, so an expiry cannot be missed at a call
+    site that only looked at the stored value.
+    """
+
+    tier_display = serializers.CharField(source="get_tier_display", read_only=True)
+    effective_tier = serializers.CharField(read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+    includes_reports = serializers.BooleanField(read_only=True)
+    worker_limit = serializers.IntegerField(read_only=True, allow_null=True)
+
+    class Meta:
+        model = SocietySubscription
+        fields = [
+            "id",
+            "society",
+            "tier",
+            "tier_display",
+            "effective_tier",
+            "valid_until",
+            "is_active",
+            "includes_reports",
+            "worker_limit",
+            "note",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class TipOwedSerializer(serializers.Serializer):
+    """One worker's outstanding tips, for hand settlement (Module 8.7).
+
+    Grouped per worker rather than per payment because the administrator is
+    handing over one amount to one person; the receipt numbers travel alongside
+    so it can be reconciled against the ledger afterwards.
+    """
+
+    worker_id = serializers.IntegerField(read_only=True)
+    worker_name = serializers.CharField(read_only=True)
+    worker_phone = serializers.CharField(read_only=True)
+    tip_paise = serializers.IntegerField(read_only=True)
+    tip_display = serializers.CharField(read_only=True)
+    payment_count = serializers.IntegerField(read_only=True)
+    receipts = serializers.ListField(child=serializers.CharField(), read_only=True)

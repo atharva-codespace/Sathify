@@ -714,9 +714,169 @@ def _self_check_in_decision(geofence, expected: list) -> tuple[str, str]:
     return Decision.ALLOWED, ""
 
 
+# ---------------------------------------------------------------------------
+# 13.3 tier 2.5 — the resident scans the worker's printed card
+# ---------------------------------------------------------------------------
+#
+# The gap the other two fallbacks leave. Tier 2 needs the worker to own a
+# smartphone. Tier 3 needs a guard with a paper register. Neither reaches the
+# case that is actually common in a small society: nobody on the gate, and a
+# worker with a feature phone or no phone at all.
+#
+# So the credential moves onto laminated cardboard - the same GatePass code,
+# printed - and the scanner becomes the resident's own phone, which they
+# demonstrably have, because they are using this app to arrange the visit.
+#
+# WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT
+# -------------------------------------------
+# It establishes that somebody holding the worker's card was in front of a
+# resident who has an active engagement with her, at a plausible time and
+# place. That is meaningfully stronger than tier 2 - a second person is
+# attesting - and meaningfully weaker than a guard, because the resident is
+# not neutral and a card can be handed over.
+#
+# So it obeys the same rule as every other tier: it can never deny. The worst
+# it produces is PENDING_REVIEW, because a worker turned away by somebody
+# else's misconfigured phone loses a day's wages for a measurement error.
+
+
+class NoEngagementWithWorker(AttendanceError):
+    """The scanning resident has no live arrangement with this worker."""
+
+    code = "no_engagement_with_worker"
+
+
+@dataclass(frozen=True)
+class ResidentScanResult:
+    event: AttendanceEvent
+    created: bool
+    geofence: object
+    decision: str
+    reason: str
+
+    @property
+    def needs_review(self) -> bool:
+        return self.decision == Decision.PENDING_REVIEW
+
+
+def _resident_scan_decision(geofence, expected: list, engagement) -> tuple[str, str]:
+    """What a resident-witnessed scan is worth. Never returns DENIED.
+
+    Three signals, and the engagement is the one that carries the most weight:
+    a resident with a live arrangement with this worker has a reason to know
+    who is standing in front of them, and no reason to vouch for a stranger.
+
+    Location is still checked, because the failure this guards against is not
+    a dishonest resident - it is a well-meaning one tapping the button from the
+    office because the worker rang to say she had arrived.
+    """
+    if engagement is None:
+        # Should not reach here (the caller refuses first), but a decision
+        # function that silently allowed on a missing engagement would be a
+        # bad thing to leave lying around.
+        return Decision.PENDING_REVIEW, "No live arrangement with this worker."
+
+    if not geofence.available:
+        return (
+            Decision.PENDING_REVIEW,
+            geofence.reason or "Location could not be checked.",
+        )
+
+    if not geofence.inside:
+        return Decision.PENDING_REVIEW, geofence.reason
+
+    if not expected:
+        return (
+            Decision.PENDING_REVIEW,
+            "Scanned at the society, but no visit was scheduled for this time.",
+        )
+
+    return Decision.ALLOWED, ""
+
+
+def resident_scan(
+    *,
+    event_id,
+    code: str,
+    resident,
+    society,
+    direction: str,
+    occurred_at: dt.datetime,
+    latitude=None,
+    longitude=None,
+    accuracy_metres: float | None = None,
+    device_id: str = "",
+    was_offline: bool = False,
+) -> ResidentScanResult:
+    """Module 13.3 tier 2.5. Idempotent on ``event_id``.
+
+    Takes a client-generated id like every other queued event (13.1), so a
+    resident scanning on a dead connection and syncing later gets one record.
+
+    Raises :class:`NoEngagementWithWorker` rather than recording a pending
+    event, because "this resident has nothing to do with this worker" is not a
+    measurement that needs reviewing - it is the wrong person scanning, and
+    letting it through would turn the roster into a list of who owns a phone.
+    """
+    from apps.core.resilience import check_geofence
+    from apps.hiring.models import Engagement
+
+    lookup = look_up_pass(code, society.pk, at=occurred_at)
+    worker = lookup.worker
+
+    engagement = (
+        Engagement.objects.live()
+        .filter(resident=resident, worker=worker)
+        .select_related("worker__user")
+        .first()
+    )
+    if engagement is None:
+        raise NoEngagementWithWorker(
+            f"{worker.user.get_full_name()} does not work for this household, "
+            "so this card cannot be scanned here."
+        )
+
+    geofence = check_geofence(
+        latitude=latitude,
+        longitude=longitude,
+        centre_latitude=society.latitude,
+        centre_longitude=society.longitude,
+        accuracy_metres=accuracy_metres,
+    )
+
+    expected = expected_visits_for(worker.pk, occurred_at)
+    decision, reason = _resident_scan_decision(geofence, expected, engagement)
+
+    event, created = record_event(
+        event_id=event_id,
+        worker=worker,
+        society=society,
+        direction=direction,
+        method=VerificationMethod.RESIDENT_SCAN,
+        decision=decision,
+        occurred_at=occurred_at,
+        # The resident is the witness. Recorded so the audit trail names who
+        # vouched, which is the whole difference between this tier and tier 2.
+        recorded_by=resident.user,
+        gate=None,
+        decision_reason=reason,
+        device_id=device_id,
+        was_offline=was_offline,
+    )
+
+    return ResidentScanResult(
+        event=event,
+        created=created,
+        geofence=geofence,
+        decision=decision,
+        reason=reason,
+    )
+
+
 __all__ = [
     "VISIT_MATCH_WINDOW_MINUTES",
     "AttendanceError",
+    "NoEngagementWithWorker",
     "PassLookup",
     "SelfCheckInDisabled",
     "SelfCheckInResult",
@@ -728,6 +888,8 @@ __all__ = [
     "gate_roster",
     "look_up_pass",
     "record_event",
+    "resident_scan",
+    "ResidentScanResult",
     "run_face_check",
     "self_check_in",
     "sync_events",

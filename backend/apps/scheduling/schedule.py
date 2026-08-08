@@ -21,12 +21,16 @@ instantly and correctly everywhere, with no reconciliation job to get wrong.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from django.db import models
 from django.db.models import Prefetch
+from django.utils import timezone
 
 from apps.bookings.models import Booking, BookingStatus
 from apps.hiring.models import Engagement, EngagementStatus
+
+from .models import VisitStatus
 
 #: Widest range a single schedule query may span. Recurring engagements expand
 #: to one item per matching day, so an unbounded range is an unbounded response.
@@ -88,6 +92,43 @@ class ScheduleItem:
     is_cover: bool = False
     #: Who they are covering for, on that same view.
     covering_for_name: str = ""
+
+    # --- 6.6 how far through the day's work this visit is -------------------
+    #
+    # Composed from three sources, none of which is copied: the gate log says
+    # whether somebody arrived and whether they left, and TaskCompletion says
+    # whether the work was marked done. Departure travels separately from
+    # status on purpose — finishing and leaving are different facts, and a
+    # worker who stayed for a cup of tea has still finished.
+    visit_status: str = "pending"
+    checked_in_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
+    exit_confirmed_at: dt.datetime | None = None
+    completion_note: str = ""
+    completion_photo_url: str = ""
+
+    # --- 6.7 what this visit is worth ---------------------------------------
+    #
+    # ``pay_paise`` is the day's rate — what this visit is worth *if* it is
+    # worked. ``pay_state`` is the separate question of whether it has been
+    # earned yet, and it deliberately has a third value beyond yes and no.
+    pay_paise: int = 0
+    pay_state: str = "not_yet"
+
+    #: Minutes until this worker's next visit after this one. -1 when there is
+    #: no next visit inside the window that was asked for — which is not the
+    #: same as "no next visit", and the client should not render it as such.
+    minutes_to_next: int = -1
+    next_visit_at: dt.datetime | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.completed_at is not None
+
+    @property
+    def has_left(self) -> bool:
+        """Whether a departure was actually confirmed at the gate."""
+        return self.exit_confirmed_at is not None
 
     @property
     def start_minutes(self) -> int:
@@ -183,9 +224,171 @@ def _leave_index(engagement_ids, days: list[dt.date]) -> dict:
     return {(row.engagement_id, row.leave_date): row for row in rows}
 
 
-def _engagement_item(engagement, day: dt.date, leave=None) -> ScheduleItem:
+def _completion_index(engagement_ids, booking_ids, days: list[dt.date]) -> dict:
+    """Completion marks over this window, keyed by ``(source, id, date)``.
+
+    One query for the whole range, so a month's dashboard costs the same as a
+    day's.
+    """
+    from .models import TaskCompletion
+
+    engagement_ids, booking_ids = list(engagement_ids), list(booking_ids)
+    if not days or not (engagement_ids or booking_ids):
+        return {}
+
+    rows = TaskCompletion.objects.filter(
+        models.Q(engagement_id__in=engagement_ids, visit_date__gte=days[0],
+                 visit_date__lte=days[-1])
+        | models.Q(booking_id__in=booking_ids)
+    )
+
+    index = {}
+    for row in rows:
+        if row.engagement_id:
+            index[("engagement", row.engagement_id, row.visit_date)] = row
+        else:
+            index[("booking", row.booking_id, row.visit_date)] = row
+    return index
+
+
+def _attendance_index(worker_ids, days: list[dt.date]) -> dict:
+    """First allowed entry and last allowed exit per worker per day.
+
+    Read from the gate log rather than duplicated onto the visit, because the
+    gate is where arrival is actually established (Module 7) and a second copy
+    would eventually disagree with it. A denied or still-pending entry is not
+    an arrival, so neither counts here.
+    """
+    from apps.attendance.models import AttendanceEvent, Decision, Direction
+
+    worker_ids = list(worker_ids)
+    if not days or not worker_ids:
+        return {}
+
+    rows = AttendanceEvent.objects.filter(
+        worker_id__in=worker_ids,
+        decision=Decision.ALLOWED,
+        occurred_at__date__gte=days[0],
+        occurred_at__date__lte=days[-1],
+    ).values("worker_id", "direction", "occurred_at")
+
+    index: dict = {}
+    for row in rows:
+        key = (row["worker_id"], timezone.localtime(row["occurred_at"]).date())
+        slot = index.setdefault(key, {"entry": None, "exit": None})
+
+        if row["direction"] == Direction.ENTRY:
+            # Earliest arrival: a worker who passed the gate twice arrived once.
+            if slot["entry"] is None or row["occurred_at"] < slot["entry"]:
+                slot["entry"] = row["occurred_at"]
+        elif row["direction"] == Direction.EXIT:
+            # Latest departure: stepping out and back is not leaving.
+            if slot["exit"] is None or row["occurred_at"] > slot["exit"]:
+                slot["exit"] = row["occurred_at"]
+
+    return index
+
+
+#: A visit that was worked and marked done. The money is owed.
+PAY_EARNED = "earned"
+#: Still today, still open. Nothing has been decided and nothing needs to be.
+PAY_NOT_YET = "not_yet"
+#: The day is over and the work was never marked complete.
+#:
+#: **This is a flag, not a verdict.** Whether an unmarked day is paid in full,
+#: pro-rated, or not paid is a policy decision with somebody's wages on the end
+#: of it, and there is no defensible default to invent here — a worker may have
+#: done the whole job and forgotten to press a button, or a phone may have been
+#: flat, or she may genuinely not have come. The dashboard surfaces it and a
+#: person decides. See ``docs/monetisation.md`` and the Section 6 status note.
+PAY_UNRESOLVED = "unresolved"
+
+
+def _pay_for(item_source: str, subject, completion, day: dt.date) -> tuple[int, str]:
+    """What a visit is worth, and whether it has been earned yet.
+
+    The amount comes from ``daily_rate_paise`` for a recurring engagement and
+    the agreed price for a one-day booking — reusing the existing figures rather
+    than introducing a second way to value a day's work.
+    """
+    from apps.payments.models import rupees_to_paise
+    from apps.payments.services import daily_rate_paise
+
+    if item_source == "booking":
+        amount = rupees_to_paise(getattr(subject, "quoted_price", 0) or 0)
+    else:
+        amount = daily_rate_paise(subject)
+
+    if completion is not None:
+        return amount, PAY_EARNED
+    if day < timezone.localdate():
+        return amount, PAY_UNRESOLVED
+    return amount, PAY_NOT_YET
+
+
+def _apply_next_visit(items: list[ScheduleItem]) -> list[ScheduleItem]:
+    """Fill in the gap to each worker's following visit.
+
+    Computed after assembly, over the sorted list, so it costs one pass and no
+    extra queries. A visit with nothing after it inside the requested window
+    keeps ``minutes_to_next = -1`` rather than 0 — "no next visit in this
+    window" and "the next visit is now" are very different things to show
+    somebody.
+    """
+    filled: list[ScheduleItem] = []
+    by_worker: dict[int, ScheduleItem] = {}
+
+    # Backwards, so each item already knows the one that follows it.
+    for item in reversed(items):
+        following = by_worker.get(item.worker_id)
+        if following is not None:
+            start = _as_datetime(following.date, following.start_time)
+            here = _as_datetime(item.date, item.end_time)
+            gap = int((start - here).total_seconds() // 60)
+            item = replace(
+                item, minutes_to_next=max(0, gap), next_visit_at=start
+            )
+        by_worker[item.worker_id] = item
+        filled.append(item)
+
+    filled.reverse()
+    return filled
+
+
+def _as_datetime(day: dt.date, moment: dt.time) -> dt.datetime:
+    naive = dt.datetime.combine(day, moment)
+    return timezone.make_aware(naive, timezone.get_current_timezone())
+
+
+def _visit_progress(completion, attendance) -> dict:
+    """Compose the three signals into the fields a schedule item carries."""
+    entry = (attendance or {}).get("entry")
+    departure = (attendance or {}).get("exit")
+
+    if completion is not None:
+        status = VisitStatus.COMPLETE
+    elif entry is not None:
+        status = VisitStatus.IN_PROGRESS
+    else:
+        status = VisitStatus.PENDING
+
+    photo = getattr(completion, "photo", None)
+    return {
+        "visit_status": status,
+        "checked_in_at": entry,
+        "completed_at": completion.completed_at if completion else None,
+        "exit_confirmed_at": departure,
+        "completion_note": completion.note if completion else "",
+        "completion_photo_url": photo.url if photo else "",
+    }
+
+
+def _engagement_item(
+    engagement, day: dt.date, leave=None, progress=None, completion=None
+) -> ScheduleItem:
     timing = _timing_for(engagement)
     cover = leave.replacement if leave is not None and leave.replacement_id else None
+    pay_paise, pay_state = _pay_for("engagement", engagement, completion, day)
 
     return ScheduleItem(
         source="engagement",
@@ -208,6 +411,9 @@ def _engagement_item(engagement, day: dt.date, leave=None) -> ScheduleItem:
         leave_status=leave.status if leave is not None else "",
         leave_request_id=leave.pk if leave is not None else 0,
         cover_worker_name=cover.user.get_full_name() if cover else "",
+        pay_paise=pay_paise,
+        pay_state=pay_state,
+        **(progress or {}),
     )
 
 
@@ -272,7 +478,7 @@ def _cover_items(days: list[dt.date], **filters) -> list[ScheduleItem]:
     return [_cover_item(row) for row in rows]
 
 
-def _booking_item(booking) -> ScheduleItem:
+def _booking_item(booking, progress=None, completion=None) -> ScheduleItem:
     return ScheduleItem(
         source="booking",
         source_id=booking.pk,
@@ -291,6 +497,9 @@ def _booking_item(booking) -> ScheduleItem:
         is_confirmed=booking.status == BookingStatus.CONFIRMED,
         expected_arrival=booking.start_time,
         task_notes=booking.notes,
+        pay_paise=_pay_for("booking", booking, completion, booking.scheduled_date)[0],
+        pay_state=_pay_for("booking", booking, completion, booking.scheduled_date)[1],
+        **(progress or {}),
     )
 
 
@@ -299,7 +508,16 @@ def _assemble(
 ) -> list[ScheduleItem]:
     """Expand recurring engagements over ``days`` and merge in the bookings."""
     engagements = list(engagements)
+    bookings = list(bookings)
     leave = _leave_index([e.pk for e in engagements], days)
+
+    # Module 6.6 — two more batched lookups, both constant in the range.
+    completions = _completion_index(
+        [e.pk for e in engagements], [b.pk for b in bookings], days
+    )
+    attendance = _attendance_index(
+        {e.worker_id for e in engagements} | {b.worker_id for b in bookings}, days
+    )
 
     items: list[ScheduleItem] = []
 
@@ -307,16 +525,37 @@ def _assemble(
         for day in days:
             if engagement.occurs_on(day):
                 items.append(
-                    _engagement_item(engagement, day, leave.get((engagement.pk, day)))
+                    _engagement_item(
+                        engagement,
+                        day,
+                        leave.get((engagement.pk, day)),
+                        _visit_progress(
+                            completions.get(("engagement", engagement.pk, day)),
+                            attendance.get((engagement.worker_id, day)),
+                        ),
+                        completions.get(("engagement", engagement.pk, day)),
+                    )
                 )
 
-    items.extend(_booking_item(booking) for booking in bookings)
+    items.extend(
+        _booking_item(
+            booking,
+            _visit_progress(
+                completions.get(("booking", booking.pk, booking.scheduled_date)),
+                attendance.get((booking.worker_id, booking.scheduled_date)),
+            ),
+            completions.get(("booking", booking.pk, booking.scheduled_date)),
+        )
+        for booking in bookings
+    )
     if extra:
         items.extend(extra)
 
     # Chronological, with a stable tie-break so pagination and diffing behave.
     items.sort(key=lambda item: (item.date, item.start_minutes, item.source, item.source_id))
-    return items
+
+    # 6.7 — one pass over the sorted list, no extra queries.
+    return _apply_next_visit(items)
 
 
 def worker_schedule(worker_id, start: dt.date, end: dt.date) -> list[ScheduleItem]:

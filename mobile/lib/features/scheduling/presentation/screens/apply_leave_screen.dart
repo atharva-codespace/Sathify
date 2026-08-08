@@ -158,16 +158,26 @@ class _ApplyLeaveScreenState extends ConsumerState<ApplyLeaveScreen> {
                   Text('Which household?',
                       style: Theme.of(context).textTheme.titleSmall,),
                   const SizedBox(height: AppSpacing.xs),
-                  ...active.map(
-                    (engagement) => RadioListTile<int>(
-                      value: engagement.id,
-                      groupValue: _engagement?.id,
-                      onChanged: (_) => setState(() {
-                        _engagement = engagement;
-                        _leaveDate = null;
-                      }),
-                      title: Text(engagement.residentName),
-                      subtitle: Text(engagement.residentFlat),
+                  // RadioGroup owns the selection; the tiles carry only their
+                  // value. Replaces the pair deprecated after Flutter 3.32.
+                  RadioGroup<int>(
+                    groupValue: _engagement?.id,
+                    onChanged: (id) => setState(() {
+                      _engagement = active.firstWhere((e) => e.id == id);
+                      // The chosen day belongs to the previous household's
+                      // working days, so it cannot carry over.
+                      _leaveDate = null;
+                    }),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final engagement in active)
+                          RadioListTile<int>(
+                            value: engagement.id,
+                            title: Text(engagement.residentName),
+                            subtitle: Text(engagement.residentFlat),
+                          ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: AppSpacing.md),

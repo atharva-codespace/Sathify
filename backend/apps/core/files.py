@@ -27,7 +27,49 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from django.conf import settings
+
 logger = logging.getLogger(__name__)
+
+#: Ceiling for a photo attached to a complaint or a completed visit.
+#:
+#: Lower than the 10 MB the KYC pipeline allows, and deliberately so: a KYC scan
+#: is read by OCR and needs the resolution, while these are evidence a person
+#: looks at. The binding constraint is the 512 MB instance
+#: (docs/free-tier-constraints.md §3) — Django buffers an upload in memory up to
+#: FILE_UPLOAD_MAX_MEMORY_SIZE, and a handful of concurrent 20 MB photos on a
+#: free-tier box is an out-of-memory kill, not a slow request.
+#:
+#: A modern phone camera produces 2–5 MB, so this rejects almost nothing real.
+MAX_PHOTO_BYTES = 8 * 1024 * 1024
+
+
+class PhotoTooLarge(ValueError):
+    """Raised when an uploaded photo exceeds :data:`MAX_PHOTO_BYTES`."""
+
+
+def validate_photo(uploaded, *, max_bytes: int | None = None):
+    """Size-check an uploaded photo. Returns it unchanged, or raises.
+
+    Only the size. ``ImageField`` already verifies that the bytes decode as an
+    image, which is the check that matters for content, and duplicating it here
+    would mean two places to keep in step.
+
+    The message names the actual limit — "file too large" without a number
+    leaves somebody resizing an image by guesswork.
+    """
+    limit = max_bytes if max_bytes is not None else getattr(
+        settings, "MAX_PHOTO_BYTES", MAX_PHOTO_BYTES
+    )
+
+    size = getattr(uploaded, "size", 0) or 0
+    if size > limit:
+        raise PhotoTooLarge(
+            f"That photo is {size // (1024 * 1024)} MB. "
+            f"The limit is {limit // (1024 * 1024)} MB — "
+            "please send a smaller one."
+        )
+    return uploaded
 
 
 @contextmanager
@@ -80,4 +122,4 @@ def local_path(field_file, *, suffix: str | None = None):
             logger.warning("Could not remove temporary file %s", temp_name)
 
 
-__all__ = ["local_path"]
+__all__ = ["MAX_PHOTO_BYTES", "PhotoTooLarge", "local_path", "validate_photo"]

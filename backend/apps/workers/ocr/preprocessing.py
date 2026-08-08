@@ -118,9 +118,23 @@ def estimate_skew_angle(image: np.ndarray) -> float:
 
     angle = cv2.minAreaRect(coordinates.astype(np.float32))[-1]
 
-    # minAreaRect reports within [0, 90); map to a signed tilt about horizontal.
+    # Normalise into (-45, 45], the only range a page tilt meaningfully occupies.
+    #
+    # Both tails have to be handled, and the missing one is why this silently
+    # stopped working. ``minAreaRect``'s angle convention is not stable across
+    # OpenCV versions — 3.x and early 4.x report [-90, 0), 4.5+ report (0, 90],
+    # and which tail a given tilt lands in also depends on the point ordering.
+    # This build (OpenCV 5.0) returns -82.9 for a 7-degree tilt: correct, but
+    # expressed as "82.9 degrees the other way about the other axis".
+    #
+    # Handling only ``angle > 45`` left that untouched, then rejected it for
+    # exceeding MAX_DESKEW_DEGREES — so every skewed document silently came back
+    # as "no tilt" and went to OCR crooked. A quiet accuracy regression rather
+    # than an error, which is the kind that survives a long time.
     if angle > 45:
         angle -= 90
+    elif angle < -45:
+        angle += 90
 
     if abs(angle) > MAX_DESKEW_DEGREES:
         logger.debug("Skew estimate %.1f deg exceeds limit; ignoring.", angle)

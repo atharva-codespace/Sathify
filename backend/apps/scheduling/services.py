@@ -729,8 +729,120 @@ def close_lapsed_leave(*, today: dt.date | None = None) -> int:
     return closed
 
 
+# ---------------------------------------------------------------------------
+# 6.6 Marking a day's work done
+# ---------------------------------------------------------------------------
+#
+#   resident requests ──► worker accepts ──► [Module 4/5, already built]
+#            │
+#            ▼
+#   gate ENTRY logged  ──────────────────►  IN_PROGRESS   (Module 7, reused)
+#            │
+#            ▼
+#   worker marks the task done  ─────────►  COMPLETE      (this section)
+#            │
+#            ▼
+#   guard scans them out (Direction.EXIT) ► departure confirmed
+#                                            (Module 7 again — the same scan
+#                                             screen, the other direction)
+#
+# Only the middle step is new. The two gate steps already exist and are reused
+# rather than reimplemented: a second check-in mechanism would eventually
+# disagree with the first about whether somebody was at work.
+
+
+class VisitNotFound(LeaveError):
+    """No such visit on that date for this worker."""
+
+    code = "visit_not_found"
+
+
+@transaction.atomic
+def mark_task_complete(
+    *, worker, visit_date: dt.date, engagement=None, booking=None, note: str = "",
+    photo=None,
+):
+    """The worker says the day's work is done. Idempotent.
+
+    Deliberately **not** conditional on a check-in having been recorded. A
+    broken gate scanner, a guard on a break, or a GPS fix that would not settle
+    are none of them the worker's fault, and none should be able to stop her
+    saying she finished the job. The household sees arrival and completion as
+    separate facts and can ask about a mismatch.
+
+    Re-marking returns the existing row rather than moving the timestamp: the
+    completion time is evidence, and a double tap on a bad connection must not
+    quietly rewrite it.
+    """
+    from .models import TaskCompletion
+
+    if (engagement is None) == (booking is None):
+        raise VisitNotFound("A completion belongs to exactly one visit.")
+
+    if engagement is not None:
+        if not engagement.occurs_on(visit_date):
+            raise VisitNotFound(
+                "This engagement does not call for a visit on that day."
+            )
+        society = engagement.society
+        lookup = {"engagement": engagement, "visit_date": visit_date}
+    else:
+        society = booking.society
+        visit_date = booking.scheduled_date
+        lookup = {"booking": booking, "visit_date": visit_date}
+
+    completion, created = TaskCompletion.objects.get_or_create(
+        **lookup,
+        defaults={
+            "society": society,
+            "worker": worker,
+            "note": note[:300],
+            "completed_at": timezone.now(),
+        },
+    )
+
+    if created:
+        # A photo is attached after creation so the unique constraint decides
+        # first — otherwise a retry uploads a second copy of the same image
+        # before discovering the row already exists.
+        if photo is not None:
+            completion.photo = photo
+            completion.save(update_fields=["photo", "updated_at"])
+
+        _notify_completion(completion)
+        logger.info(
+            "Task marked complete: worker=%s date=%s engagement=%s booking=%s",
+            worker.pk, visit_date, getattr(engagement, "pk", None),
+            getattr(booking, "pk", None),
+        )
+
+    return completion
+
+
+def _notify_completion(completion) -> None:
+    """Tell the household. Close to real-time is the point of this step."""
+    from apps.notifications.models import NotificationCategory
+    from apps.notifications.services import notify
+
+    engagement = completion.engagement or completion.booking
+    resident = getattr(engagement, "resident", None)
+    if resident is None:
+        return
+
+    notify(
+        recipient=resident.user,
+        category=NotificationCategory.SCHEDULE,
+        title=f"{completion.worker.user.get_full_name()} has finished today",
+        body=completion.note or "The day's work is marked complete.",
+        data={"route": "/schedule", "visit_date": str(completion.visit_date)},
+        society=completion.society,
+    )
+
+
 __all__ = [
     "MAX_LEAVE_LEAD_DAYS",
+    "VisitNotFound",
+    "mark_task_complete",
     "REMINDER_HORIZON_DAYS",
     "ConflictReport",
     "DuplicateLeave",

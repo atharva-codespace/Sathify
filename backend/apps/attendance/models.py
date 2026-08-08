@@ -127,6 +127,14 @@ class VerificationMethod(models.TextChoices):
     FACE = "face", _("Face verified")
     MANUAL = "manual", _("Logged manually by the guard")
     SELF_CHECKIN = "self_checkin", _("Worker checked in from the app")
+    #: Module 13.3 tier 2.5 — the resident scans the worker's printed card.
+    #:
+    #: For the case neither of the other fallbacks reaches: no guard on the
+    #: gate *and* the worker has no smartphone. Tier 2 needs her phone; tier 3
+    #: needs a guard with a paper register. This needs neither — the card is
+    #: laminated cardboard and the scanner is the resident's own phone, which
+    #: they already have because they are using this app to let her in.
+    RESIDENT_SCAN = "resident_scan", _("Resident scanned the worker's card")
     REGISTER = "register", _("Transcribed from the paper register")
 
 

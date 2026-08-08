@@ -144,6 +144,114 @@ class TaskTiming(TimeStampedModel):
         return max(0, actual - expected)
 
 
+class VisitStatus(models.TextChoices):
+    """How far through the day's work a visit is.
+
+    Composed on read from three signals rather than stored as a column, because
+    two of the three already exist elsewhere and copying them would create a
+    second version of the truth:
+
+    * **PENDING** — nothing has happened yet.
+    * **IN_PROGRESS** — the gate logged an entry (Module 7), or the worker
+      self-checked-in (13.3 tier 2). Not stored here; read from attendance.
+    * **COMPLETE** — the worker marked the task done. This *is* stored here,
+      because it exists nowhere else. See :class:`TaskCompletion`.
+
+    Departure is deliberately **not** a fourth state. A worker can finish the
+    job and leave twenty minutes later, or finish and stay for a cup of tea;
+    neither says anything about whether the work was done. It travels alongside
+    as its own flag so the household can see both facts without one implying
+    the other.
+    """
+
+    PENDING = "pending", _("Not started")
+    IN_PROGRESS = "in_progress", _("In progress")
+    COMPLETE = "complete", _("Complete")
+
+
+class TaskCompletion(SocietyScopedModel, TimeStampedModel):
+    """Module 6.6 — the worker marks a day's work done.
+
+    ---------------------------------------------------------------------------
+    WHY THIS IS A ROW WHEN THE SCHEDULE IS NOT
+    ---------------------------------------------------------------------------
+    ``schedule.py`` stores nothing: a visit is derived from an engagement's
+    recurring terms and a date. So "the visit on the 14th was completed" has
+    nowhere to live — it is not derivable from the engagement, the booking, the
+    availability calendar, or the gate log. Same reasoning that gave
+    ``LeaveRequest`` a row, and the same discipline: this stores *only* the fact
+    that has no other home, and the schedule reads it back when it expands.
+
+    ---------------------------------------------------------------------------
+    WHY THE WORKER MARKS IT, AND WHY IT IS NOT A GATE EVENT
+    ---------------------------------------------------------------------------
+    A gate entry says somebody arrived. It does not say the kitchen was cleaned.
+    Conflating the two would pay on presence rather than work, and would break
+    entirely for the tiers where there is no guard at all (13.3).
+
+    So the worker marks it from their own phone, and it is deliberately *not*
+    conditional on a check-in having been recorded. A gate scanner that was
+    broken, a guard who was on a break, a GPS fix that would not settle — none
+    of those are the worker's fault, and none of them should stop her saying she
+    finished the job. The household sees both facts separately and can ask.
+    """
+
+    engagement = models.ForeignKey(
+        "hiring.Engagement",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="task_completions",
+    )
+    booking = models.ForeignKey(
+        "bookings.Booking",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="task_completions",
+    )
+    worker = models.ForeignKey(
+        "workers.WorkerProfile", on_delete=models.CASCADE, related_name="task_completions"
+    )
+
+    #: The day the visit was for, not the day the button was pressed. A worker
+    #: finishing at 00:10 is completing yesterday's visit.
+    visit_date = models.DateField(db_index=True)
+    completed_at = models.DateTimeField(default=timezone.now)
+
+    note = models.CharField(max_length=300, blank=True)
+
+    #: Module 7 (Section 7) — proof of completion. Optional, always: requiring a
+    #: photo would make a flat battery or a cracked camera into an unpaid day.
+    photo = models.ImageField(upload_to="visits/completions/%Y/%m/", blank=True)
+
+    class Meta:
+        ordering = ["-visit_date", "-completed_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["engagement", "visit_date"],
+                condition=models.Q(engagement__isnull=False),
+                name="one_completion_per_engagement_day",
+            ),
+            models.UniqueConstraint(
+                fields=["booking"],
+                condition=models.Q(booking__isnull=False),
+                name="one_completion_per_booking",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(engagement__isnull=False, booking__isnull=True)
+                    | models.Q(engagement__isnull=True, booking__isnull=False)
+                ),
+                name="completion_belongs_to_exactly_one_visit",
+            ),
+        ]
+        indexes = [models.Index(fields=["worker", "visit_date"])]
+
+    def __str__(self):
+        return f"{self.worker} completed {self.visit_date}"
+
+
 class LeaveStatus(models.TextChoices):
     """Where a leave request has got to.
 
