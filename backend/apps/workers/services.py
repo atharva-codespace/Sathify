@@ -169,8 +169,14 @@ def process_kyc_document(kyc: KycDocument, *, form_data: dict | None = None) -> 
     kyc.save(update_fields=["status", "updated_at"])
 
     try:
+        # Bytes, not ``.path``: only FileSystemStorage has a filesystem path, and
+        # production stores documents in Supabase. Stage 1 takes either, so
+        # reading the file through the storage API keeps this backend-agnostic.
+        with kyc.document_image.open("rb") as handle:
+            document_bytes = handle.read()
+
         result = run_ocr_pipeline(
-            kyc.document_image.path,
+            document_bytes,
             filename=kyc.document_image.name,
             form_data=form_data,
         )
