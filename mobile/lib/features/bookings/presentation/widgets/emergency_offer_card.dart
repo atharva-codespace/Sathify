@@ -180,8 +180,7 @@ class _EmergencyOfferCardState extends ConsumerState<EmergencyOfferCard> {
               ),
               const SizedBox(width: AppSpacing.xs),
               Text(
-                'cash · ${offer.durationMinutes} min · from '
-                '${offer.startTimeLabel}',
+                '${offer.durationMinutes} min · from ${offer.startTimeLabel}',
                 style: theme.textTheme.bodySmall,
               ),
             ],

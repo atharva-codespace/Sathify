@@ -12,7 +12,7 @@ void main() {
   group('Booking — the completion flag comes from the server', () {
     Map<String, dynamic> payload({
       bool canMarkDone = false,
-      String settlement = 'app',
+      bool isEmergency = false,
       String status = 'confirmed',
       bool isPaid = false,
     }) =>
@@ -23,9 +23,10 @@ void main() {
           'start_time': '14:30:00',
           'quoted_price': 800,
           'can_mark_done': canMarkDone,
-          'is_emergency': settlement == 'cash',
-          'settlement': settlement,
-          'emergency_surcharge_paise': settlement == 'cash' ? 10000 : 0,
+          'is_emergency': isEmergency,
+          // Always 'app' now. Emergency work was briefly settled in cash.
+          'settlement': 'app',
+          'emergency_surcharge_paise': isEmergency ? 10000 : 0,
           'is_paid': isPaid,
         };
 
@@ -47,22 +48,20 @@ void main() {
       expect(booking.canMarkDone, isFalse);
     });
 
-    test('a cash job never asks the household to pay in the app', () {
-      final cash = Booking.fromJson(
-        payload(status: 'completed', settlement: 'cash'),
+    test('a completed emergency asks the household to pay, like any job', () {
+      // This is the reversal: emergency work was briefly settled in cash and
+      // deliberately excluded from in-app payment. Every booking now settles
+      // the same way, so the Pay button must appear here too.
+      final emergency = Booking.fromJson(
+        payload(status: 'completed', isEmergency: true),
       );
 
-      expect(cash.isCashSettled, isTrue);
-      // The guard that stops a second, phantom charge for money that is about
-      // to change hands in notes.
-      expect(cash.needsPayment, isFalse);
+      expect(emergency.isEmergency, isTrue);
+      expect(emergency.needsPayment, isTrue);
     });
 
-    test('an ordinary completed job still does', () {
-      final app = Booking.fromJson(payload(status: 'completed'));
-
-      expect(app.isCashSettled, isFalse);
-      expect(app.needsPayment, isTrue);
+    test('an ordinary completed job does too', () {
+      expect(Booking.fromJson(payload(status: 'completed')).needsPayment, isTrue);
     });
 
     test('a paid job is not asked for again', () {
@@ -97,6 +96,8 @@ void main() {
       bool canMarkDone = false,
       String settlement = 'app',
       String visitStatus = 'pending',
+      bool isConfirmed = true,
+      bool canRespond = false,
     }) =>
         {
           'source': 'booking',
@@ -107,7 +108,54 @@ void main() {
           'can_mark_done': canMarkDone,
           'settlement': settlement,
           'visit_status': visitStatus,
+          'is_confirmed': isConfirmed,
+          'can_respond': canRespond,
         };
+
+    test('an answerable request offers the answer', () {
+      final pending = ScheduleItem.fromJson(
+        row(isConfirmed: false, canRespond: true),
+      );
+
+      expect(pending.needsResponse, isTrue);
+      expect(pending.canRespond, isTrue);
+      // Not lapsed: there is still something to tap, which is the whole
+      // difference between this and the reported bug.
+      expect(pending.responseLapsed, isFalse);
+    });
+
+    test('a request past its deadline is lapsed, not still "awaiting"', () {
+      final lapsed = ScheduleItem.fromJson(
+        row(isConfirmed: false, canRespond: false),
+      );
+
+      expect(lapsed.needsResponse, isTrue);
+      // The state the card used to render as "Awaiting your confirmation" with
+      // nothing to tap. It now says so plainly instead.
+      expect(lapsed.responseLapsed, isTrue);
+    });
+
+    test('a confirmed visit is neither awaiting nor lapsed', () {
+      final confirmed = ScheduleItem.fromJson(row());
+
+      expect(confirmed.needsResponse, isFalse);
+      expect(confirmed.responseLapsed, isFalse);
+    });
+
+    test('an old server that omits the flag offers no button', () {
+      // Absent means "do not offer it". Guessing from is_confirmed is exactly
+      // what would put an Accept button on a request the server would refuse.
+      expect(
+        ScheduleItem.fromJson({
+          'source': 'booking',
+          'source_id': 7,
+          'date': '2026-08-09',
+          'start_time': '14:30:00',
+          'is_confirmed': false,
+        }).canRespond,
+        isFalse,
+      );
+    });
 
     test('carries the server\'s completion flag', () {
       expect(ScheduleItem.fromJson(row(canMarkDone: true)).canMarkDone, isTrue);
@@ -124,9 +172,10 @@ void main() {
       expect(done.canMarkDone, isFalse);
     });
 
-    test('an emergency visit is flagged as cash-settled', () {
-      expect(ScheduleItem.fromJson(row(settlement: 'cash')).isCashSettled, isTrue);
-      expect(ScheduleItem.fromJson(row()).isCashSettled, isFalse);
+    test('every visit settles through the app', () {
+      // One settlement route across the whole app now — the card no longer has
+      // to branch on how a job is paid.
+      expect(ScheduleItem.fromJson(row()).settlement, 'app');
     });
   });
 
@@ -215,7 +264,7 @@ void main() {
             'start_time': '10:00:00',
             'quoted_price': 500,
             'is_emergency': true,
-            'settlement': 'cash',
+            'settlement': 'app',
           }
         ],
         'version': 'b',
@@ -223,7 +272,7 @@ void main() {
 
       // Somebody is coming, so there is nothing left to watch second by second.
       expect(claimed.hasLiveWork, isFalse);
-      expect(claimed.requests.single.isCashSettled, isTrue);
+      expect(claimed.requests.single.isEmergency, isTrue);
     });
   });
 
@@ -234,15 +283,16 @@ void main() {
         'surcharge_rupees': 100,
         'lead_days': 0,
         'rationale': 'Raised for today.',
-        'worker_fee_settlement': 'cash',
-        'worker_fee_note': 'The worker is paid directly in cash.',
+        'worker_fee_settlement': 'app',
+        'worker_fee_note':
+            'Their charge is separate and asked for once the job is done.',
       });
 
       expect(quote.rupees, 100);
       expect(quote.leadDays, 0);
       // The screen that collects payment A must be able to say what payment B
-      // is, in the server's own words.
-      expect(quote.workerFeeNote, contains('cash'));
+      // is, in the server's own words — a different amount, at a later moment.
+      expect(quote.workerFeeNote, contains('separate'));
     });
   });
 }

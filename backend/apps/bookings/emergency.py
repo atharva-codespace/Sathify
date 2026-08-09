@@ -19,15 +19,21 @@ it is priced by lead time (``policy.emergency_surcharge``). Collecting it up
 front is not a convenience: an unpaid request that had already rung eight phones
 would be an eight-person interruption the platform could not undo.
 
-**B — the worker's fee.** Resident → worker, in cash, hand to hand, on the day.
-The app never touches it, never opens an order for it, and must never imply it
-did. All it does is record that the job was completed and tell both parties the
-same figure at the same moment, which is the worker's only protection against a
-household that later says it already paid.
+**B — the worker's fee.** Resident → worker, through the app, once the job is
+marked done. Exactly like an ordinary one-day booking: completion opens the
+payment (``services.complete_booking`` → ``_prompt_for_payment``) and the
+household settles it from the payments screen.
 
-Conflating the two would be the single most damaging mistake available here, so
-they are different ``PaymentKind`` values, different call paths, and — for B —
-no ``Payment`` row at all.
+An earlier version of this flow settled B in cash, hand to hand, with the app
+recording only that the work was finished. That is reversed — every booking is
+now paid the same way. The reversal removed a whole class of divergence (one
+completion path, one payment path, one answer to "has this been paid"), and it
+put the worker's fee behind a receipt rather than behind the household having
+the right notes at the door.
+
+The two are still different money: A is owed to Sathify and has no worker on it,
+B is owed to the worker and never carries a platform fee. They stay different
+``PaymentKind`` values so nothing can quietly total them together.
 
 -------------------------------------------------------------------------------
 THE RACE IS DECIDED BY ONE CONDITIONAL UPDATE. NOTHING ELSE.
@@ -464,8 +470,8 @@ def _notify_claimed(booking: Booking) -> None:
             title=f"{booking.worker.user.get_full_name()} is on the way",
             body=(
                 f"They accepted your emergency {booking.category.name.lower()} "
-                f"request. ₹{booking.quoted_price} payable in cash when the job "
-                "is done."
+                f"request. ₹{booking.quoted_price} payable in the app once the "
+                "job is done."
             ),
             data={"route": "/bookings", "booking": booking.pk},
             society=booking.society,

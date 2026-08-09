@@ -175,6 +175,30 @@ class HiringRepository {
     return Engagement.fromJson(response['engagement'] as Map<String, dynamic>);
   }
 
+  /// Module 4.6 — what this month's worked days come to, before notice.
+  ///
+  /// Always fetched and shown before the resident confirms, for the same reason
+  /// the cancellation quote is: a charge that appears only after the fact is
+  /// the kind of surprise that costs an app its users — and this one arrives at
+  /// the moment a working relationship is ending.
+  Future<NoticeSettlement> fetchNoticeSettlement(int engagementId) async {
+    final response = await _client.get(ApiEndpoints.noticeSettlement(engagementId))
+        as Map<String, dynamic>;
+    return NoticeSettlement.fromJson(response);
+  }
+
+  /// Opens the ledger row for that settlement. Returns the **payment id** the
+  /// caller takes through the pay sheet.
+  ///
+  /// Idempotent on the engagement and month: re-opening the screen or retrying
+  /// on a poor connection resumes the same row rather than raising a second
+  /// demand for the same wages.
+  Future<String> openNoticeSettlement(int engagementId) async {
+    final response = await _client.post(ApiEndpoints.noticeSettlement(engagementId))
+        as Map<String, dynamic>;
+    return (response['payment'] as Map<String, dynamic>)['id'] as String;
+  }
+
   /// Both sides changed their mind before the last working day.
   Future<Engagement> withdrawNotice(int engagementId) async {
     final response = await _client.post(ApiEndpoints.withdrawNotice(engagementId))

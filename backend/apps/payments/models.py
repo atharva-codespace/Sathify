@@ -78,6 +78,13 @@ class PaymentKind(models.TextChoices):
     #: why it is the only kind whose ``worker`` is null. The emergency worker's
     #: own fee is cash and has no row here at all — see bookings/emergency.py.
     EMERGENCY_SURCHARGE = "emergency_surcharge", _("Emergency booking fee")
+    #: Module 4.6 — this month's worked days, settled before notice takes effect.
+    #:
+    #: Its own kind rather than another ENGAGEMENT_SALARY row, because notice is
+    #: gated on it: ``hiring.settlement`` has to be able to ask "has the final
+    #: settlement been paid" and get an answer that a routine mid-month salary
+    #: payment cannot accidentally satisfy on its own terms.
+    NOTICE_SETTLEMENT = "notice_settlement", _("Final settlement on notice")
 
 
 #: Kinds the platform collects for itself. Excluded from anything that answers
@@ -92,6 +99,20 @@ class PaymentStatus(models.TextChoices):
     FAILED = "failed", _("Failed")
     REFUNDED = "refunded", _("Refunded")
     CANCELLED = "cancelled", _("Cancelled before payment")
+
+
+class SettledVia(models.TextChoices):
+    """Which path moved a payment to PAID.
+
+    Stored rather than inferred, because the three are not equally strong and
+    anybody auditing the ledger later needs to know which is which without
+    reading the code. The two gateway values rest on a verified HMAC; the manual
+    one rests on a named administrator and a bank reference.
+    """
+
+    CHECKOUT = "checkout", _("Signed Razorpay checkout response")
+    WEBHOOK = "webhook", _("Razorpay webhook")
+    UPI_MANUAL = "upi_manual", _("UPI transfer, confirmed against a statement")
 
 
 class PaymentQuerySet(models.QuerySet):
@@ -187,6 +208,59 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
     razorpay_payment_id = models.CharField(max_length=64, blank=True, db_index=True)
     #: Kept for the audit trail: it is the evidence that PAID was justified.
     razorpay_signature = models.CharField(max_length=128, blank=True)
+
+    # --- Module 8.9: the hosted UPI QR ---------------------------------------
+    #
+    # Razorpay draws and watches the code; we keep its id so a
+    # ``qr_code.credited`` webhook can be matched back to this row, and its URL
+    # and expiry so re-opening the pay sheet reuses the code somebody may
+    # already have photographed rather than issuing a new one.
+    # `db_default` on all three, and it is load-bearing rather than tidy — see
+    # the note on `settled_via` below.
+    razorpay_qr_code_id = models.CharField(
+        max_length=64, blank=True, db_index=True, db_default=""
+    )
+    razorpay_qr_image_url = models.URLField(max_length=500, blank=True, db_default="")
+    qr_expires_at = models.DateTimeField(null=True, blank=True)
+
+    #: The Payment Links fallback, for accounts without the QR Codes API.
+    #:
+    #: Kept in its own columns rather than overloading the QR ones: the two are
+    #: different Razorpay objects with different webhooks, and a single "code id"
+    #: column would leave the webhook handler guessing which kind it held.
+    razorpay_payment_link_id = models.CharField(
+        max_length=64, blank=True, db_index=True, db_default=""
+    )
+    razorpay_payment_link_url = models.URLField(
+        max_length=500, blank=True, db_default=""
+    )
+
+    #: Which of the three settlement paths moved this row to PAID (Module 8.9).
+    #:
+    #: Blank on anything unsettled. Worth a column of its own because the paths
+    #: carry different weight — two are HMAC-verified and one is an
+    #: administrator's word against a bank statement — and "which payments rest
+    #: on a person rather than a signature?" must be answerable with a filter
+    #: rather than a code review.
+    #: ``db_default`` is not cosmetic. Django's own ``default`` lives in Python,
+    #: so a column added without a *database* default is ``NOT NULL`` with
+    #: nothing to fall back on — and any process running code that predates the
+    #: field omits it from its INSERT and gets an IntegrityError.
+    #:
+    #: That is not hypothetical here: this database is shared between a
+    #: developer's machine and the deployed instance, so a migration applied
+    #: from one lands under the other while it is still serving. Adding these
+    #: columns without ``db_default`` took the live app down — every payment
+    #: insert failed, which meant every emergency request failed, and the
+    #: household saw "something went wrong on our side".
+    #:
+    #: A database-level default makes the schema readable by both the old code
+    #: and the new, which is the property a shared database needs and the reason
+    #: every text column added here carries one.
+    settled_via = models.CharField(
+        max_length=20, choices=SettledVia.choices, blank=True, db_index=True,
+        db_default="",
+    )
 
     # --- Module 8.3 ---------------------------------------------------------
     receipt_number = models.CharField(max_length=32, unique=True, db_index=True)
@@ -308,13 +382,23 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
         """Still awaiting an outcome — the resident may still pay it."""
         return self.status in {PaymentStatus.CREATED, PaymentStatus.PENDING}
 
-    def mark_paid(self, *, razorpay_payment_id: str, signature: str = "") -> bool:
+    def mark_paid(
+        self,
+        *,
+        razorpay_payment_id: str,
+        signature: str = "",
+        via: str = SettledVia.CHECKOUT,
+    ) -> bool:
         """Settle the payment. Idempotent.
 
-        Only ever called from a signature-verified path. A second confirmation
-        for the same payment — Razorpay retries webhooks — must not move
-        ``paid_at``, because that timestamp decides which month's salary
-        summary this lands in.
+        Called from the two signature-verified gateway paths and from UPI
+        reconciliation — see the module docstring in ``services.py`` for why
+        that third path exists and what stands in for the signature there.
+        ``via`` records which, so the distinction survives in the data.
+
+        A second confirmation for the same payment — Razorpay retries webhooks —
+        must not move ``paid_at``, because that timestamp decides which month's
+        salary summary this lands in.
         """
         if self.status == PaymentStatus.PAID:
             return False
@@ -322,12 +406,13 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
         self.status = PaymentStatus.PAID
         self.razorpay_payment_id = razorpay_payment_id
         self.razorpay_signature = signature
+        self.settled_via = via
         self.paid_at = timezone.now()
         self.failure_reason = ""
         self.save(
             update_fields=[
                 "status", "razorpay_payment_id", "razorpay_signature",
-                "paid_at", "failure_reason", "updated_at",
+                "settled_via", "paid_at", "failure_reason", "updated_at",
             ]
         )
         return True
@@ -358,6 +443,67 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
             update_fields=["refunded_paise", "refunded_at", "status", "updated_at"]
         )
         return True
+
+
+class UpiSettlement(TimeStampedModel):
+    """Module 8.9 — an administrator confirming a UPI transfer arrived.
+
+    ---------------------------------------------------------------------------
+    THE ROW *IS* THE EVIDENCE
+    ---------------------------------------------------------------------------
+    A UPI QR collects straight into a VPA, so there is no signed callback to
+    verify — the money simply appears on a bank statement. What replaces the
+    signature is this row: a named administrator, a timestamp, and the bank's
+    own UTR, all of which can be checked against that statement afterwards.
+
+    Same reasoning as :class:`WebhookEvent`. Applying the confirmation and
+    forgetting it would leave only the conclusion, and "why is this marked paid?"
+    is precisely the question somebody will ask six months later.
+
+    ---------------------------------------------------------------------------
+    THE UNIQUE UTR IS THE CONTROL THAT MATTERS
+    ---------------------------------------------------------------------------
+    A UTR identifies one transfer, once. Making it unique across the whole ledger
+    means a single line on a bank statement can settle at most one payment — so
+    an administrator cannot, by mistake or otherwise, clear five outstanding
+    charges by pasting the same reference five times. That is the difference
+    between "an admin confirms what the bank shows" and "an admin can mark
+    things paid", and it is enforced by the database rather than by care.
+    """
+
+    payment = models.OneToOneField(
+        Payment, on_delete=models.CASCADE, related_name="upi_settlement"
+    )
+
+    #: The bank's Unique Transaction Reference for the transfer, as it appears
+    #: on the statement. Normalised to uppercase so the same reference typed two
+    #: ways cannot slip past the unique constraint.
+    utr = models.CharField(
+        max_length=40,
+        unique=True,
+        db_index=True,
+        help_text=_("The bank's UTR for this transfer. One UTR settles one payment."),
+    )
+
+    #: What the administrator saw on the statement, checked against the payment's
+    #: own total before this row is written. Stored because a later dispute is
+    #: about the figure somebody looked at, not the figure we expected.
+    amount_paise = models.PositiveIntegerField()
+
+    confirmed_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.PROTECT,
+        related_name="confirmed_upi_settlements",
+        help_text=_("Who took responsibility for this confirmation."),
+    )
+    note = models.CharField(max_length=300, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["confirmed_by", "-created_at"])]
+
+    def __str__(self):
+        return f"UPI {self.utr} → {self.payment.receipt_number}"
 
 
 class WebhookEvent(TimeStampedModel):

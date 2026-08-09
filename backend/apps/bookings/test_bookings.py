@@ -646,10 +646,21 @@ class TestCreateBooking:
         assert response.status_code == 400
         assert response.data["error"]["code"] == "notice_too_short"
 
-    def test_emergency_category_bypasses_the_notice_window(
+    def test_an_emergency_cannot_be_aimed_at_one_chosen_worker(
         self, authenticated_client, resident, resident_user,
         worker, emergency_category,
     ):
+        """Module 5.5 — an emergency broadcasts, or it does not happen.
+
+        This endpoint used to accept one: the category was notice-exempt, so it
+        sailed through the window check and produced a request aimed at a single
+        worker. That booking collected no surcharge, reached nobody else, and
+        expired at its own start time — which is precisely the request a worker
+        reported being unable to accept.
+
+        Refused here rather than only routed around in the app, because an app
+        build that has not been updated must not be able to create one.
+        """
         day, moment = hours_from_now(2)
         DayAvailability.objects.create(worker=worker, date=day, is_available=True)
 
@@ -663,20 +674,21 @@ class TestCreateBooking:
             format="json",
         )
 
-        assert response.status_code == 201
+        assert response.status_code == 409
+        assert response.data["error"]["code"] == "emergency_must_broadcast"
 
-    def test_a_booking_in_the_past_is_refused_even_for_emergencies(
-        self, authenticated_client, resident, resident_user, worker, emergency_category
+    def test_an_ordinary_category_is_unaffected(
+        self, authenticated_client, resident, resident_user,
+        available_worker, cleaning_category, booking_date,
     ):
-        yesterday = timezone.localdate() - dt.timedelta(days=1)
-        DayAvailability.objects.create(worker=worker, date=yesterday, is_available=True)
-
+        """The refusal is scoped to notice-exempt categories and nothing else."""
         response = authenticated_client(resident_user).post(
             reverse(self.URL),
-            booking_payload(worker, emergency_category, yesterday),
+            booking_payload(available_worker, cleaning_category, booking_date),
             format="json",
         )
-        assert response.status_code == 400
+
+        assert response.status_code == 201
 
     def test_overlapping_booking_is_refused(
         self, authenticated_client, resident, resident_user,

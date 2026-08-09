@@ -522,6 +522,90 @@ class Engagement {
       );
 }
 
+/// Module 4.6 — the pro-rata a household owes before it can give notice.
+///
+/// -----------------------------------------------------------------------
+/// EVERY TERM IS SHOWN, ON PURPOSE
+/// -----------------------------------------------------------------------
+/// This is the last money to change hands in a relationship that is ending, and
+/// a figure nobody can account for at that moment is a figure that becomes a
+/// complaint. So the screen shows the division rather than just the answer:
+/// days worked, days scheduled, the monthly rate, and what falls out of it.
+///
+/// [daysWorked] counts days the helper *actually* worked — a gate entry or a
+/// completed-visit mark, whichever exists. It is not the number of calendar
+/// days that have passed.
+class NoticeSettlement {
+  const NoticeSettlement({
+    required this.daysWorked,
+    required this.scheduledDays,
+    required this.monthlyRatePaise,
+    required this.amountPaise,
+    this.attendedDays = 0,
+    this.completedDays = 0,
+    this.presumedDays = 0,
+    this.daysInMonth = 0,
+    this.amountDisplay = '',
+    this.monthlyRateDisplay = '',
+    this.explanation = '',
+    this.isOutstanding = false,
+    this.blocksNotice = false,
+  });
+
+  /// Distinct days worked so far this calendar month.
+  final int daysWorked;
+
+  /// Visits this month's terms called for. **Not** the denominator — shown
+  /// alongside it so the resident can see what a full month would have been.
+  final int scheduledDays;
+
+  /// Where the worked days came from. Not shown directly — [explanation]
+  /// already says it in the server's own words — but carried for disputes.
+  final int attendedDays;
+  final int completedDays;
+
+  /// Days counted from the roster alone: her terms called for a visit, the day
+  /// has passed, and no leave was recorded against it. A gate log is only
+  /// attached to an engagement when the scan lands inside the visit window, so
+  /// without this a helper who came every day can settle at zero.
+  final int presumedDays;
+
+  /// Calendar days in the month. **The denominator**:
+  /// `days_worked / days_in_month * monthly_rate`.
+  final int daysInMonth;
+
+  final int monthlyRatePaise;
+  final int amountPaise;
+  final String amountDisplay;
+  final String monthlyRateDisplay;
+  final String explanation;
+
+  /// Whether anything is actually still owed. Distinct from a non-zero
+  /// [amountPaise]: a salary already paid this month can cover the pro-rata,
+  /// and a household must never be asked twice for the same work.
+  final bool isOutstanding;
+
+  /// Whether notice is blocked until this is paid.
+  final bool blocksNotice;
+
+  factory NoticeSettlement.fromJson(Map<String, dynamic> json) =>
+      NoticeSettlement(
+        daysWorked: json['days_worked'] as int? ?? 0,
+        scheduledDays: json['scheduled_days'] as int? ?? 0,
+        attendedDays: json['attended_days'] as int? ?? 0,
+        completedDays: json['completed_days'] as int? ?? 0,
+        presumedDays: json['presumed_days'] as int? ?? 0,
+        daysInMonth: json['days_in_month'] as int? ?? 0,
+        monthlyRatePaise: json['monthly_rate_paise'] as int? ?? 0,
+        amountPaise: json['amount_paise'] as int? ?? 0,
+        amountDisplay: json['amount_display'] as String? ?? '',
+        monthlyRateDisplay: json['monthly_rate_display'] as String? ?? '',
+        explanation: json['explanation'] as String? ?? '',
+        isOutstanding: json['is_outstanding'] as bool? ?? false,
+        blocksNotice: json['blocks_notice'] as bool? ?? false,
+      );
+}
+
 /// Module 4.6 — the ten-day notice rule, client side.
 ///
 /// Mirrors `NOTICE_PERIOD_DAYS` in `apps/hiring/models.py`. The server is the

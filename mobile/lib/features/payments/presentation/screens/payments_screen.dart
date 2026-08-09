@@ -8,7 +8,7 @@ import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../data/models/payment_models.dart';
-import '../../data/razorpay_checkout.dart';
+import '../widgets/pay_sheet.dart';
 import '../providers/payment_provider.dart';
 
 /// Module 8.2 — the ledger, and the place a resident actually pays.
@@ -121,50 +121,34 @@ class _PaymentCard extends ConsumerStatefulWidget {
 }
 
 class _PaymentCardState extends ConsumerState<_PaymentCard> {
-  final _checkout = RazorpayCheckout();
   bool _isBusy = false;
 
-  @override
-  void dispose() {
-    _checkout.dispose();
-    super.dispose();
-  }
-
-  /// Module 8.1 — open the order, run checkout, hand the signature back.
+  /// Modules 8.1 and 8.9 — offer every method, then act on what came back.
+  ///
+  /// The checkout mechanics moved into [PaySheet] when UPI was added: three
+  /// screens collect money, and a second payment method copied into three
+  /// places is a second payment method that goes missing from one of them.
   Future<void> _pay() async {
     setState(() => _isBusy = true);
-    final repository = ref.read(paymentRepositoryProvider);
+    final outcome = await showPaySheet(context, widget.payment);
+    if (!mounted) return;
+    setState(() => _isBusy = false);
 
-    try {
-      final payload = await repository.openCheckout(widget.payment.id);
-      final outcome = await _checkout.open(payload);
-
-      if (!mounted) return;
-
-      if (outcome.cancelled) {
-        setState(() => _isBusy = false);
-        return;
-      }
-      if (!outcome.succeeded) {
-        setState(() => _isBusy = false);
-        _tell(outcome.message);
-        return;
-      }
-
-      // The signature is what settles it — the app's own "success" does not.
-      await repository.confirmCheckout(
-        widget.payment.id,
-        razorpayPaymentId: outcome.razorpayPaymentId,
-        signature: outcome.signature,
-      );
-
-      if (!mounted) return;
-      invalidatePayments(ref);
-      _tell('Payment confirmed.');
-    } on ApiException catch (error) {
-      if (!mounted) return;
-      setState(() => _isBusy = false);
-      _tell(error.message);
+    switch (outcome) {
+      case PayOutcome.paid:
+        invalidatePayments(ref);
+        _tell('Payment confirmed.');
+      case PayOutcome.pendingUpi:
+        // Deliberately not "paid". A UPI transfer to our VPA produces no signed
+        // callback, so the app cannot know it succeeded — it settles when the
+        // webhook confirms it, and claiming otherwise here would let anybody
+        // mark their own payment settled by closing a sheet.
+        invalidatePayments(ref);
+        _tell('Finish in your UPI app. This updates once the money arrives.');
+      case PayOutcome.failed:
+      case PayOutcome.cancelled:
+      case null:
+        break;
     }
   }
 
@@ -321,8 +305,8 @@ class _Empty extends StatelessWidget {
       icon: Icons.receipt_long_outlined,
       title: 'Nothing yet',
       message: isWorker
-                  ? 'Payments from residents will appear here.'
-                  : 'Payments you owe will appear here once work is done.',
+          ? 'Payments from residents will appear here.'
+          : 'Payments you owe will appear here once work is done.',
     );
   }
 }

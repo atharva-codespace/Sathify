@@ -280,12 +280,12 @@ class Booking {
   /// Module 5.5 — raised through the broadcast flow.
   final bool isEmergency;
 
-  /// How the *worker's* fee is settled: `app` or `cash`.
+  /// How the *worker's* fee is settled. Always `app`.
   ///
-  /// Sent by the server rather than inferred from the category, because getting
-  /// it wrong either way is a payment bug — an in-app charge on a cash job
-  /// double-charges the household, and a cash label on an app job leaves the
-  /// worker unpaid.
+  /// Emergency work was briefly settled in cash, which meant the app had to
+  /// know not to charge for it. Every booking now settles the same way, so this
+  /// has one value — kept because the server still sends it and an older build
+  /// may still read it.
   final String settlement;
 
   /// Module 5.5 — the platform fee already paid for this request. Never the
@@ -305,7 +305,10 @@ class Booking {
   bool get isPending => status == BookingStatus.pending;
   bool get isConfirmed => status == BookingStatus.confirmed;
 
-  /// Paid in cash, hand to hand. The app must never offer to collect it.
+  /// Always false now. Emergency work was briefly settled in cash; every
+  /// booking is paid through the app, so this is retained only so an older
+  /// screen that still branches on it keeps compiling.
+  @Deprecated('All bookings settle in-app. Remove branches on this.')
   bool get isCashSettled => settlement == 'cash';
 
   /// Raised and paid for, but nobody has taken it yet.
@@ -319,7 +322,7 @@ class Booking {
   /// offering one would open a second, phantom payment for money that is about
   /// to change hands in notes.
   bool get needsPayment =>
-      status == BookingStatus.completed && !isPaid && !isCashSettled;
+      status == BookingStatus.completed && !isPaid;
 
   /// Pending or confirmed — still occupies the worker's day.
   bool get isLive =>

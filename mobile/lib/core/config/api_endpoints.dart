@@ -113,6 +113,12 @@ class ApiEndpoints {
   static String withdrawNotice(int engagementId) =>
       '/hiring/engagements/$engagementId/notice/withdraw/';
 
+  /// 4.6 — the pro-rata owed for this month's worked days. `GET` returns the
+  /// breakdown to show before confirming; `POST` opens the payment that clears
+  /// it. Notice is refused with `dues_outstanding` until it settles.
+  static String noticeSettlement(int engagementId) =>
+      '/hiring/engagements/$engagementId/settlement/';
+
   // --- Module 5: One-Day Service Booking -------------------------------------
   /// 5.1 — the bookable catalogue, with duration and price guidance.
   static const String serviceCategories = '/bookings/categories/';
@@ -289,6 +295,11 @@ class ApiEndpoints {
   /// what actually settles the payment; the app's own word does not.
   static String paymentConfirm(String paymentId) =>
       '/payments/$paymentId/confirm/';
+
+  /// 8.9 — the `upi://pay` link and QR payload for a payment. Any payment, not
+  /// only emergencies. 503 when no VPA is configured, which the client reads as
+  /// "hide the QR" rather than as a failure.
+  static String paymentUpi(String paymentId) => '/payments/$paymentId/upi/';
 
   /// 8.6 — raise a dispute on a payment.
   static String paymentDispute(String paymentId) =>

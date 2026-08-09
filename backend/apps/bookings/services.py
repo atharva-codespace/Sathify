@@ -85,6 +85,12 @@ class BookingNotActionable(BookingError):
     code = "booking_not_actionable"
 
 
+class EmergencyMustBroadcast(BookingError):
+    """A notice-exempt category may not be booked at one named worker."""
+
+    code = "emergency_must_broadcast"
+
+
 # ---------------------------------------------------------------------------
 # 5.3 Same-day availability matching
 # ---------------------------------------------------------------------------
@@ -253,6 +259,27 @@ def create_booking(
     unique constraint only catches an identical start time, not a genuine
     overlap.
     """
+    # ---------------------------------------------------------------------
+    # An emergency category never comes through here (Module 5.5).
+    # ---------------------------------------------------------------------
+    # Directing an emergency at one named worker is the flow this endpoint
+    # offers, and it is the wrong shape for the problem: the household waits on
+    # one person who may simply not answer, and discovers that one person at a
+    # time. It is also what produced the request that could not be answered at
+    # all — booked minutes ahead, at a single worker, expiring at its own start
+    # time on a screen that had no Accept button.
+    #
+    # Enforced on the server rather than by only routing the app elsewhere,
+    # because a booking created this way is not a cosmetic problem: it collects
+    # no surcharge, reaches nobody but the one worker, and settles through the
+    # in-app charge rather than in cash. A stale build must not be able to make
+    # one.
+    if category.bypasses_notice_period:
+        raise EmergencyMustBroadcast(
+            "Emergency requests go to every available worker at once rather "
+            "than to one you choose. Raise it from the emergency flow instead."
+        )
+
     # Re-read under lock so the conflict check below sees a stable world.
     locked_worker = WorkerProfile.objects.select_for_update().get(pk=worker.pk)
 
@@ -469,16 +496,10 @@ def complete_booking(booking: Booking) -> Booking:
     # money waited until they happened to reopen the booking screen. The worker
     # has finished and is standing there; this is exactly when to ask.
     #
-    # Except on an emergency, where the worker's fee is settled in cash between
-    # the two of them and the app has no part in it. Opening a Razorpay order
-    # for money that is about to be handed over in notes would produce a second,
-    # phantom charge and a receipt for a payment that never happens. The
-    # household is told the job is done and reminded what they owe in cash
-    # instead — see ``_confirm_cash_settlement``.
-    if locked.is_emergency:
-        _confirm_cash_settlement(locked)
-    else:
-        _prompt_for_payment(locked)
+    # Every booking, emergency included. An earlier version settled emergency
+    # work in cash and skipped this — see ``_prompt_for_payment`` for why that
+    # was reversed.
+    _prompt_for_payment(locked)
 
     # Module 9 builds a "jobs you can still rate" list, but nothing was telling
     # anyone it existed — a rating that nobody is prompted for is a rating
@@ -496,6 +517,20 @@ def _prompt_for_payment(booking: Booking) -> None:
     Only the resident: the worker is owed the money, not asked for it. Skipped
     when a live payment already exists, so re-completing an already-paid job
     does not nag somebody who has already paid.
+
+    ---------------------------------------------------------------------------
+    EMERGENCY WORK IS PAID THROUGH THE APP TOO
+    ---------------------------------------------------------------------------
+    It briefly was not. An earlier design settled the emergency worker's fee in
+    cash, hand to hand, with the app recording only that the job was done — so
+    this function was skipped for emergencies and a separate notification told
+    both sides what was owed in notes.
+
+    That is reversed. Every booking now settles the same way, which removes a
+    whole class of divergence: one completion path, one payment path, one answer
+    to "has this been paid". It also means the worker is paid through a channel
+    with a receipt behind it rather than relying on the household having the
+    right cash at the door — which was always the weaker end of that bargain.
 
     Lazily imported and non-raising, like every other Module 10 call on a write
     path — a push failure must not roll back a completed booking.
@@ -524,54 +559,6 @@ def _prompt_for_payment(booking: Booking) -> None:
         # booking card, and a payment that does not exist yet has no row on the
         # payments screen to tap.
         data={"route": "/bookings", "booking": booking.pk},
-        society=booking.society,
-    )
-
-
-def _confirm_cash_settlement(booking: Booking) -> None:
-    """Tell both sides an emergency job is done and what is owed, in cash.
-
-    ---------------------------------------------------------------------------
-    WHY THE HOUSEHOLD IS TOLD AT ALL, WHEN THE APP MOVES NO MONEY
-    ---------------------------------------------------------------------------
-    It would be simpler to say nothing: the money is outside the app, so the app
-    has no business in it. But the worker's only protection against "I already
-    paid you" is a timestamped record that both parties were told the same
-    figure at the same moment, and that costs one notification each.
-
-    This is also why completion is not gated on the resident confirming it.
-    Requiring the household to countersign would hand whoever holds the cash a
-    veto over the record of the work — exactly the imbalance this platform
-    exists to reduce. If they disagree, Module 8.6's dispute route is open to
-    them and goes to a person.
-
-    Lazily imported and non-raising, like every other Module 10 call site.
-    """
-    from apps.notifications.models import NotificationCategory
-    from apps.notifications.services import notify
-
-    worker_name = booking.worker.user.get_full_name()
-
-    notify(
-        recipient=booking.resident.user,
-        category=NotificationCategory.PAYMENT,
-        title=f"₹{booking.quoted_price} due to {worker_name} in cash",
-        body=(
-            f"{worker_name} has marked the emergency job complete. This one is "
-            "paid directly in cash — Sathify does not collect it."
-        ),
-        data={"route": "/bookings", "booking": booking.pk, "settlement": "cash"},
-        society=booking.society,
-    )
-    notify(
-        recipient=booking.worker.user,
-        category=NotificationCategory.PAYMENT,
-        title=f"₹{booking.quoted_price} to collect in cash",
-        body=(
-            f"{booking.resident.user.get_full_name()} has been told the job is "
-            "done and what is owed."
-        ),
-        data={"route": "/bookings", "booking": booking.pk, "settlement": "cash"},
         society=booking.society,
     )
 

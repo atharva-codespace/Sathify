@@ -63,7 +63,7 @@ from apps.hiring.models import Engagement
 from apps.societies.services import primary_resident_or_403
 from apps.workers.models import WorkerProfile
 
-from . import fees, gateway
+from . import fees, gateway, upi
 from .models import (
     Payment,
     PaymentDispute,
@@ -77,6 +77,7 @@ from .models import (
 from .serializers import (
     CheckoutPayloadSerializer,
     ConfirmCheckoutSerializer,
+    ConfirmUpiSettlementSerializer,
     CreateBookingPaymentSerializer,
     CreateEngagementPaymentSerializer,
     FeeQuoteSerializer,
@@ -93,11 +94,14 @@ from .serializers import (
 )
 from .services import (
     AlreadyPaid,
+    AmountMismatch,
     NothingToPay,
     PaymentError,
     SignatureInvalid,
+    UtrAlreadyUsed,
     apply_webhook,
     confirm_checkout,
+    confirm_upi_settlement,
     create_payment,
     open_order,
     record_webhook,
@@ -373,20 +377,6 @@ class CreateBookingPaymentView(APIView):
                 status.HTTP_409_CONFLICT,
             )
 
-        # Module 5.5 — an emergency worker is paid in cash, hand to hand. The
-        # app collected the platform's surcharge and nothing else, so opening a
-        # Razorpay order here would charge the household a second time for money
-        # they are about to hand over in notes. Refused on the server rather than
-        # merely hidden in the client: a stale app build, a retried request or a
-        # tapped-twice button must not be able to produce that charge.
-        if booking.is_emergency:
-            return _error(
-                "settled_in_cash",
-                "This emergency job is paid directly to the worker in cash. "
-                "Sathify does not collect it.",
-                status.HTTP_409_CONFLICT,
-            )
-
         # Idempotent on the booking: nothing stops the app from calling this
         # twice — a resident re-opening the booking, a retried request on a
         # poor connection — and there is no other constraint stopping two
@@ -460,6 +450,58 @@ class CheckoutView(APIView):
 
 @extend_schema(
     tags=["Payments"],
+    summary="UPI intent and QR payload for a payment",
+    responses=None,
+)
+class PaymentUpiView(APIView):
+    """Module 8.9 — a Razorpay-hosted UPI QR for this payment.
+
+    Available on **every** payment the caller may see, not only emergencies: the
+    brief asked for a QR on any payment in the app, and the ledger row is the
+    same shape whatever opened it.
+
+    Opening a QR is a write — it calls the gateway and stores the code's id
+    against the payment — but this is a ``GET`` because that is what the client
+    is asking for: "show me the code for this payment". Re-requesting reuses the
+    live one rather than issuing another, so it is idempotent in the way that
+    matters (see ``upi.qr_for_payment``).
+
+    Returns 503 when Razorpay is unreachable or unconfigured, so the client can
+    hide the QR and fall back to in-app checkout instead of showing a broken
+    image where a payment instruction should be.
+    """
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+
+    def get(self, request, pk):
+        payment = _payment_queryset(request.user).filter(pk=pk).first()
+        if payment is None:
+            return _error("not_found", "Payment not found.", status.HTTP_404_NOT_FOUND)
+
+        if payment.is_settled:
+            return _error(
+                "already_paid",
+                "This payment has already been settled.",
+                status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            qr = upi.qr_for_payment(payment)
+        except upi.UpiNotConfigured as exc:
+            return _error(exc.code, str(exc), status.HTTP_503_SERVICE_UNAVAILABLE)
+        except gateway.LiveKeyRefused as exc:
+            logger.error("Refused a live Razorpay key in test mode")
+            return _error(exc.code, str(exc), status.HTTP_503_SERVICE_UNAVAILABLE)
+        except gateway.GatewayUnavailable as exc:
+            return _error(exc.code, str(exc), status.HTTP_503_SERVICE_UNAVAILABLE)
+        except gateway.GatewayError as exc:
+            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+
+        return Response(qr.as_dict())
+
+
+@extend_schema(
+    tags=["Payments"],
     summary="Confirm a signed checkout response",
     request=ConfirmCheckoutSerializer,
     responses=PaymentSerializer,
@@ -495,6 +537,71 @@ class ConfirmCheckoutView(APIView):
 
         return Response(
             {"payment": PaymentSerializer(settled).data, "message": "Payment confirmed."}
+        )
+
+
+@extend_schema(
+    tags=["Payments"],
+    summary="Confirm a UPI transfer against a bank statement (administrators)",
+    request=ConfirmUpiSettlementSerializer,
+    responses=PaymentSerializer,
+)
+class ConfirmUpiSettlementView(APIView):
+    """Module 8.9 — the reconciliation path for money that arrived by UPI QR.
+
+    -------------------------------------------------------------------------
+    THIS IS THE ONE ENDPOINT THAT SETTLES WITHOUT A SIGNATURE
+    -------------------------------------------------------------------------
+    Everything else in this module refuses to trust an assertion of payment.
+    This one has to: a UPI QR collects into a VPA with no gateway in the loop,
+    so the only evidence that exists is a line on a bank statement and a person
+    who has read it.
+
+    What keeps it honest is scope rather than cryptography — society
+    administrators only, their own society only, an unsettled payment only, an
+    amount that must match, and a UTR that is unique across the entire ledger so
+    one statement line can clear exactly one charge. Who confirmed it is stored
+    against the row. See ``services.confirm_upi_settlement``.
+
+    Deliberately **not** available to the resident or the worker. The party who
+    benefits from a payment being marked paid must never be the party who marks
+    it, and that is the half of the original rule that has not moved.
+    """
+
+    permission_classes = [IsApprovedSocietyAdmin]
+    serializer_class = ConfirmUpiSettlementSerializer
+
+    def post(self, request, pk):
+        payment = (
+            Payment.objects.filter(pk=pk, society_id=request.user.society_id)
+            .select_related("resident__user", "worker__user", "booking")
+            .first()
+        )
+        if payment is None:
+            return _error("not_found", "Payment not found.", status.HTTP_404_NOT_FOUND)
+
+        serializer = ConfirmUpiSettlementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            settled = confirm_upi_settlement(
+                payment,
+                utr=data["utr"],
+                amount_paise=data["amount_paise"],
+                confirmed_by=request.user,
+                note=data.get("note", ""),
+            )
+        except (AmountMismatch, UtrAlreadyUsed) as exc:
+            return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
+        except PaymentError as exc:
+            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "payment": PaymentSerializer(settled).data,
+                "message": f"Settled against UTR {data['utr'].strip().upper()}.",
+            }
         )
 
 

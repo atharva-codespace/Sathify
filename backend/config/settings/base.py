@@ -376,6 +376,20 @@ RAZORPAY_SETTINGS = {
     "CURRENCY": "INR",
 }
 
+# --- Module 8.9: UPI QR -----------------------------------------------------
+#
+# There is deliberately no separate configuration here any more.
+#
+# The first version of this feature collected into a plain VPA set by
+# `UPI_VPA`, which meant money arrived in a bank account with no callback and
+# nothing could mark the payment paid without a human reading a statement. The
+# QR is now opened through Razorpay (`apps/payments/upi.py`), so it settles
+# through the same signed webhook a card payment does — and the only thing that
+# needs configuring is RAZORPAY_SETTINGS above.
+#
+# If you still have UPI_VPA / UPI_PAYEE_NAME / UPI_MCC in a .env, they are dead
+# and can be deleted.
+
 # --- Module 8.7: platform fees ----------------------------------------------
 # Off. The column, the calculation and the receipt line all ship before the
 # price does, so that turning pricing on is a one-line change rather than a

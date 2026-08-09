@@ -7,22 +7,40 @@ import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
+import '../../../bookings/presentation/widgets/booking_card.dart';
 import '../../data/models/hiring_models.dart';
 import '../providers/hiring_provider.dart';
 
-/// Module 4.4 — the hire-request inbox.
+/// Module 4.4 — the request inbox. For a resident, everything they have asked
+/// for; for a worker, everything asked of them.
 ///
-/// One screen serves both sides: the server returns the requests the caller is
-/// party to, so a worker sees what was sent to them and a resident sees what
-/// they sent. The role is read from the session rather than passed in, so there
-/// is one source of truth for it and no route can supply the wrong one.
+/// -----------------------------------------------------------------------
+/// TWO MODELS, ONE LIST
+/// -----------------------------------------------------------------------
+/// This screen is titled "My requests" for a resident, and it used to show only
+/// [HireRequest] rows — proposals to hire somebody for recurring work. One-day
+/// bookings, including every emergency, are a different model on a different
+/// endpoint, and lived on a separate screen reachable only through the overflow
+/// menu above.
+///
+/// So a household that raised an emergency, paid for it and was waiting for
+/// somebody to accept could open "My requests" and see nothing at all. Not a
+/// filter excluding them — they had never been in this query, because they are
+/// not in this table.
+///
+/// The two are merged here rather than server-side. A polymorphic endpoint
+/// would have to flatten a hire request and a booking into one shape, and they
+/// genuinely differ: one carries a proposed rate and a deadline, the other a
+/// date, a price and a settlement route. Merging in the client keeps both
+/// endpoints honest about what they return, and the sort key — most recent
+/// first — is the only thing the two have to agree on.
 class HireRequestsScreen extends ConsumerWidget {
   const HireRequestsScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final requests = ref.watch(hireRequestsProvider);
     final isWorker = ref.watch(authProvider).user?.role == UserRole.worker;
+    final requests = ref.watch(combinedRequestsProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -80,7 +98,7 @@ class HireRequestsScreen extends ConsumerWidget {
           message: error is ApiException
               ? error.message
               : 'Could not load requests.',
-          onRetry: () => ref.invalidate(hireRequestsProvider),
+          onRetry: () => invalidateCombinedRequests(ref),
         ),
         data: (items) {
           if (items.isEmpty) {
@@ -89,11 +107,12 @@ class HireRequestsScreen extends ConsumerWidget {
               title: isWorker ? 'No requests yet' : 'No requests sent',
               message: isWorker
                   ? 'Residents who want to hire you will appear here.'
-                  : 'Find a worker and send them a request to get started.',
+                  : 'Everything you ask for — regular help, one-day jobs and '
+                      'emergencies — appears here.',
             );
           }
           return RefreshIndicator(
-            onRefresh: () async => ref.invalidate(hireRequestsProvider),
+            onRefresh: () async => invalidateCombinedRequests(ref),
             child: ListView.builder(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(
@@ -103,13 +122,27 @@ class HireRequestsScreen extends ConsumerWidget {
                 AppSpacing.xxl,
               ),
               itemCount: items.length,
-              itemBuilder: (context, index) => AppFadeIn(
-                index: index,
-                child: _RequestCard(
-                  request: items[index],
-                  isWorker: isWorker,
-                ),
-              ),
+              itemBuilder: (context, index) {
+                final entry = items[index];
+                return AppFadeIn(
+                  index: index,
+                  // The two shapes keep their own cards. A booking's actions
+                  // (cancel with a refund, mark done, pay) have nothing in
+                  // common with a hire request's (accept, decline, withdraw),
+                  // and flattening them into one card would mean a switch on
+                  // type inside every button.
+                  child: entry.booking != null
+                      ? BookingCard(
+                          booking: entry.booking!,
+                          isWorker: isWorker,
+                          dense: true,
+                        )
+                      : _RequestCard(
+                          request: entry.hireRequest!,
+                          isWorker: isWorker,
+                        ),
+                );
+              },
             ),
           );
         },

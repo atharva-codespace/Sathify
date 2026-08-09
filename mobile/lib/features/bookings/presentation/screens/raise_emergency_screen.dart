@@ -4,10 +4,11 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/errors/api_exception.dart';
 import '../../../../shared/design_system.dart';
-import '../../../payments/data/razorpay_checkout.dart';
 import '../../../payments/presentation/providers/payment_provider.dart';
+import '../../../payments/presentation/widgets/pay_sheet.dart';
 import '../../data/models/booking_models.dart';
 import '../providers/booking_provider.dart';
+import '../widgets/category_icon.dart';
 
 /// Module 5.5 — the resident raises an emergency.
 ///
@@ -20,15 +21,24 @@ import '../providers/booking_provider.dart';
 /// a ceiling: no worker to choose (that is the point of a broadcast), no time to
 /// choose (it means now), and one thing to confirm — the fee.
 ///
+/// The category is normally already decided: this screen is reached by tapping
+/// an emergency card in the service catalogue, so it arrives with
+/// [categoryId] and has one button. Arriving without one — from a notification,
+/// say — falls back to asking, rather than guessing on the resident's behalf.
+///
 /// -----------------------------------------------------------------------
 /// THE TWO PAYMENTS ARE SAID OUT LOUD, ON THIS SCREEN
 /// -----------------------------------------------------------------------
-/// The household is about to be charged one amount by Sathify and a different
-/// amount, later, in cash, by the worker. Letting somebody discover the second
-/// one at the door would be the single most damaging thing this flow could do,
-/// so both are stated here, before the first is collected.
+/// The household is about to be charged one amount by Sathify now, and a
+/// different amount for the work itself once it is done. Letting somebody
+/// discover the second one afterwards would be the single most damaging thing
+/// this flow could do, so both are stated here, before the first is collected.
 class RaiseEmergencyScreen extends ConsumerStatefulWidget {
-  const RaiseEmergencyScreen({super.key});
+  const RaiseEmergencyScreen({this.categoryId, super.key});
+
+  /// Which emergency service was tapped. Null when the screen was reached
+  /// without one.
+  final int? categoryId;
 
   @override
   ConsumerState<RaiseEmergencyScreen> createState() =>
@@ -37,13 +47,11 @@ class RaiseEmergencyScreen extends ConsumerStatefulWidget {
 
 class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
   final _notes = TextEditingController();
-  final _checkout = RazorpayCheckout();
   bool _isBusy = false;
 
   @override
   void dispose() {
     _notes.dispose();
-    _checkout.dispose();
     super.dispose();
   }
 
@@ -64,46 +72,49 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
             categoryId: category.id,
             notes: _notes.text.trim(),
           );
-
-      final payments = ref.read(paymentRepositoryProvider);
-      final payload = await payments.openCheckout(raised.paymentId);
-      final outcome = await _checkout.open(payload);
-
-      if (!mounted) return;
-
-      if (outcome.cancelled) {
-        setState(() => _isBusy = false);
-        invalidateBookings(ref);
-        showAppSnackBarOn(
-          messenger,
-          'Request saved. Pay the fee to send it out.',
-          tone: AppTone.info,
-        );
-        return;
-      }
-      if (!outcome.succeeded) {
-        setState(() => _isBusy = false);
-        invalidateBookings(ref);
-        showAppSnackBarOn(messenger, outcome.message, tone: AppTone.danger);
-        return;
-      }
-
-      // The signature is what settles it, and settling is what broadcasts.
-      await payments.confirmCheckout(
-        raised.paymentId,
-        razorpayPaymentId: outcome.razorpayPaymentId,
-        signature: outcome.signature,
-      );
+      // Fetched back so the sheet can show the amount and open a UPI intent
+      // against a real ledger row — the raise response carries only the id.
+      final payment =
+          await ref.read(paymentRepositoryProvider).fetchPayment(raised.paymentId);
 
       if (!mounted) return;
+      final outcome = await showPaySheet(context, payment);
+      if (!mounted) return;
+
+      setState(() => _isBusy = false);
       invalidateBookings(ref);
       invalidatePayments(ref);
-      showAppSnackBarOn(
-        messenger,
-        'Sent to everyone free nearby. We will tell you who accepts.',
-        tone: AppTone.success,
-      );
-      router.pop();
+
+      switch (outcome) {
+        case PayOutcome.paid:
+          showAppSnackBarOn(
+            messenger,
+            'Sent to everyone free nearby. We will tell you who accepts.',
+            tone: AppTone.success,
+          );
+          router.pop();
+        case PayOutcome.pendingUpi:
+          // The broadcast is triggered by the payment settling, and a UPI
+          // transfer settles when the webhook says so rather than when the
+          // sheet closes. So this promises nothing about workers having been
+          // contacted — the request card on the schedule reports that when it
+          // is true.
+          showAppSnackBarOn(
+            messenger,
+            'Finish in your UPI app. We will send the request the moment it '
+            'clears.',
+            tone: AppTone.info,
+          );
+          router.pop();
+        case PayOutcome.failed:
+        case PayOutcome.cancelled:
+        case null:
+          showAppSnackBarOn(
+            messenger,
+            'Request saved. Pay the fee to send it out.',
+            tone: AppTone.info,
+          );
+      }
     } on ApiException catch (error) {
       if (!mounted) return;
       setState(() => _isBusy = false);
@@ -131,8 +142,7 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
             onRetry: () => ref.invalidate(serviceCategoriesProvider),
           ),
           data: (items) {
-            final urgent =
-                items.where((c) => c.bypassesNoticePeriod).toList();
+            final urgent = items.where((c) => c.bypassesNoticePeriod).toList();
             if (urgent.isEmpty) {
               return const AppEmptyState(
                 icon: Icons.emergency_outlined,
@@ -140,6 +150,14 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
                 message: 'Your society administrator sets this up.',
               );
             }
+
+            // Narrowed to the card that was tapped, when there was one. A
+            // resident who has already chosen "Emergency household assistance"
+            // in the catalogue should not be asked to choose it again.
+            final chosen = widget.categoryId == null
+                ? null
+                : urgent.where((c) => c.id == widget.categoryId).firstOrNull;
+            final offered = chosen == null ? urgent : [chosen];
 
             return ListView(
               padding: const EdgeInsets.fromLTRB(
@@ -149,6 +167,10 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
                 AppSpacing.xxl,
               ),
               children: [
+                if (chosen != null) ...[
+                  _ChosenService(category: chosen),
+                  const SizedBox(height: AppSpacing.md),
+                ],
                 _HowItWorks(
                   quote: quote.maybeWhen(
                     data: (value) => value,
@@ -165,11 +187,17 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
                   ),
                 ),
                 const SizedBox(height: AppSpacing.sm),
-                for (final category in urgent) ...[
+                for (final category in offered) ...[
                   AppButton(
                     label: _isBusy
                         ? 'Sending…'
-                        : 'Send ${category.name.toLowerCase()} request',
+                        // One button, one verb, when the service is already
+                        // settled. The long "Send <service name> request" only
+                        // earns its length when there is more than one to tell
+                        // apart.
+                        : offered.length == 1
+                            ? 'Send request now'
+                            : 'Send ${category.name.toLowerCase()} request',
                     icon: Icons.bolt_rounded,
                     isLoading: _isBusy,
                     onPressed: () => _raise(category),
@@ -180,6 +208,57 @@ class _RaiseEmergencyScreenState extends ConsumerState<RaiseEmergencyScreen> {
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+/// Confirms which service is about to be sent, when it came from the catalogue.
+///
+/// Small, and worth the space: the resident tapped a card and then landed on a
+/// screen with a completely different shape from every other category's, so it
+/// should say plainly that it is still the thing they tapped.
+class _ChosenService extends StatelessWidget {
+  const _ChosenService({required this.category});
+
+  final ServiceCategory category;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return AppCard(
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: const BoxDecoration(
+              color: AppColors.dangerSoft,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              iconForCategory(category.icon),
+              size: AppIconSize.md,
+              color: AppColors.danger,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(category.name, style: theme.textTheme.titleSmall),
+                const SizedBox(height: 2),
+                Text(
+                  'About ${category.durationLabel} · '
+                  '${category.priceGuidance.isNotEmpty ? category.priceGuidance : "₹${category.priceMin}"} for the work',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -216,10 +295,12 @@ class _HowItWorks extends StatelessWidget {
           const SizedBox(height: AppSpacing.sm),
           const _Step(
             icon: Icons.payments_outlined,
-            title: 'The worker is paid separately, in cash',
-            // The sentence this whole screen exists to make unmissable.
-            body: 'Their charge is agreed with you and paid directly to them '
-                'when the job is done. Sathify does not collect it.',
+            title: 'The work itself is paid after it is done',
+            // The sentence this whole screen exists to make unmissable: there
+            // is a second, larger amount, and it is not what is being collected
+            // right now.
+            body: 'You are asked for their charge in the app once they mark the '
+                'job complete — not now.',
           ),
           const SizedBox(height: AppSpacing.sm),
           const _Step(

@@ -394,18 +394,12 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
         title: 'Mark this work as done?',
         hint: 'Optional — anything the household should know',
         confirmLabel: 'Mark as done',
-        // Say what the button actually does before she taps it, and say it
-        // differently for the three cases, because they are different: a
-        // recurring visit moves no money, an ordinary booking opens an in-app
-        // charge, and an emergency is settled in cash on the spot. Telling her
-        // the household "will be asked to pay" on a cash job would have her
-        // waiting for a transfer that is never coming.
+        // Say what the button actually does before she taps it. A recurring
+        // visit moves no money; a one-day job is what asks the household to
+        // pay, and she should know that is what the button does.
         footnote: item.isRecurring
             ? 'The household will be told straight away.'
-            : item.isCashSettled
-                ? 'Collect the payment in cash. Both of you will be sent the '
-                    'amount owed.'
-                : 'The household will be asked to pay for this job.',
+            : 'The household will be asked to pay for this job.',
       ),
     );
     if (note == null) return;
@@ -427,9 +421,7 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
         messenger,
         item.isRecurring
             ? 'Marked done. The household has been told.'
-            : item.isCashSettled
-                ? 'Marked done. Collect the payment in cash.'
-                : 'Marked done. The household has been asked to pay.',
+            : 'Marked done. The household has been asked to pay.',
         tone: AppTone.success,
       );
     } on ApiException catch (error) {

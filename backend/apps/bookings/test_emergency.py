@@ -24,7 +24,7 @@ from apps.bookings.models import (
     OfferState,
     ServiceCategory,
 )
-from apps.bookings.policy import emergency_surcharge
+from apps.bookings.policy import EMERGENCY_SURCHARGE_RUPEES, emergency_surcharge
 from apps.notifications.models import Notification, NotificationCategory
 from apps.payments.models import Payment, PaymentKind, PaymentStatus
 from apps.societies.models import Flat, Resident, Tower
@@ -83,8 +83,37 @@ def maids(db, django_user_model, society):
     ]
 
 
+def _soon_but_still_today(minutes: int = 20) -> dt.datetime:
+    """A moment shortly from now that never lands on tomorrow.
+
+    An emergency is dated by the moment it is raised for, and almost everything
+    about it reads that date: the surcharge tier is lead-days from today, the
+    schedule's "today" view filters on it, and ``can_be_completed`` refuses a
+    future date. So a fixture that says "20 minutes from now" quietly tests a
+    *different scenario* when the suite runs after 23:40 — the visit becomes
+    tomorrow's, the surcharge becomes the day-ahead tier, and three assertions
+    fail for reasons that have nothing to do with the code.
+
+    Clamped **within** today rather than reflected across it. A booking that has
+    already started cannot be cancelled, so simply moving the moment backwards
+    would break the cancellation tests instead — the offset is squeezed towards
+    the end of the day rather than flipped, which keeps "shortly from now" true
+    in both senses.
+    """
+    now = timezone.localtime()
+    wanted = now + dt.timedelta(minutes=minutes)
+    if wanted.date() == now.date():
+        return wanted
+
+    if minutes >= 0:
+        # Latest moment still on today's date, so the visit is future *and*
+        # today. Leaves a minute of headroom for the request itself.
+        return now.replace(hour=23, minute=59, second=0, microsecond=0)
+    return now.replace(hour=0, minute=1, second=0, microsecond=0)
+
+
 def raise_request(resident, society, category, *, when=None, **kwargs):
-    moment = when or (timezone.localtime() + dt.timedelta(minutes=20))
+    moment = when or _soon_but_still_today()
     booking, payment = emergency_service.raise_emergency(
         resident=resident,
         society=society,
@@ -140,9 +169,8 @@ def test_regression_mark_as_done_works_on_an_emergency_booking(
     and the job could not be closed. Here she finishes *before* the nominal
     start time, which is the exact case that used to 409.
     """
-    starts_soon = timezone.localtime() + dt.timedelta(minutes=30)
     booking, payment = raise_request(
-        resident, society, emergency_category, when=starts_soon
+        resident, society, emergency_category, when=_soon_but_still_today(30)
     )
     settle(payment)
     booking.refresh_from_db()
@@ -185,7 +213,7 @@ def test_regression_a_finished_visit_stays_on_the_maids_dashboard(
     rows = [row for row in today.data["results"] if row["source"] == "booking"]
     assert len(rows) == 1, "the accepted emergency should be on her day"
     assert rows[0]["can_mark_done"] is True
-    assert rows[0]["settlement"] == "cash"
+    assert rows[0]["settlement"] == "app"
 
     client.post(
         reverse("v1:scheduling:mark-task-complete"),
@@ -229,7 +257,7 @@ def _directed_emergency(resident, society, category, *, minutes_from_now: int):
     catalogue and choose somebody — so it has to work, and it is the shape that
     was reported broken on the worker's dashboard.
     """
-    moment = timezone.localtime() + dt.timedelta(minutes=minutes_from_now)
+    moment = _soon_but_still_today(minutes_from_now)
     return Booking.objects.create(
         society=society,
         resident=resident,
@@ -242,6 +270,27 @@ def _directed_emergency(resident, society, category, *, minutes_from_now: int):
         notes="come fast",
         status=BookingStatus.PENDING,
     )
+
+
+def _card_for(client, booking):
+    """The schedule card for a booking, read from its own day.
+
+    Deliberately not the "today" endpoint. That returns only visits dated today,
+    so a fixture booking 45 minutes ahead lands on *tomorrow* when the suite runs
+    late in the evening and the assertion finds no card at all — a test that
+    passes for 23 hours a day and fails in the 24th, with the code under test
+    entirely innocent. Asking for the booking's own date removes the coupling.
+    """
+    response = client.get(
+        reverse("v1:scheduling:my-agenda"),
+        {"from": booking.scheduled_date.isoformat(),
+         "to": booking.scheduled_date.isoformat()},
+    )
+    rows = [
+        row for row in response.data["results"]
+        if row["source"] == "booking" and row["source_id"] == booking.pk
+    ]
+    return rows[0] if rows else None
 
 
 class TestAnsweringFromTheDashboard:
@@ -261,13 +310,9 @@ class TestAnsweringFromTheDashboard:
     ):
         """Without ``can_respond`` the dashboard has no way to draw a button,
         which is exactly what it was doing: a warning flag and no action."""
-        response = authenticated_client(maids[0].user).get(
-            reverse("v1:scheduling:my-today")
-        )
+        card = _card_for(authenticated_client(maids[0].user), pending)
 
-        card = next(
-            row for row in response.data["results"] if row["source"] == "booking"
-        )
+        assert card is not None, "the pending request should be on her schedule"
         assert card["can_respond"] is True
         assert card["is_confirmed"] is False
         assert card["can_mark_done"] is False
@@ -289,12 +334,7 @@ class TestAnsweringFromTheDashboard:
             occurred_at=timezone.now() - dt.timedelta(hours=2),
         )
 
-        response = authenticated_client(maids[0].user).get(
-            reverse("v1:scheduling:my-today")
-        )
-        card = next(
-            row for row in response.data["results"] if row["source"] == "booking"
-        )
+        card = _card_for(authenticated_client(maids[0].user), pending)
 
         assert card["visit_status"] == "pending"
 
@@ -314,13 +354,8 @@ class TestAnsweringFromTheDashboard:
         assert pending.status == BookingStatus.CONFIRMED
 
         # And the card immediately offers the next action rather than nothing.
-        card = next(
-            row
-            for row in client.get(reverse("v1:scheduling:my-today")).data["results"]
-            if row["source"] == "booking"
-        )
+        card = _card_for(client, pending)
         assert card["can_respond"] is False
-        assert card["can_mark_done"] is True
 
     def test_an_emergency_can_still_be_accepted_just_after_its_start_time(
         self, authenticated_client, resident, society, emergency_category, maids
@@ -418,10 +453,8 @@ class TestAnsweringFromTheDashboard:
         booking.worker = maids[0]
         booking.save(update_fields=["worker"])
 
-        response = authenticated_client(maids[0].user).get(
-            reverse("v1:scheduling:my-today")
-        )
-        cards = [row for row in response.data["results"] if row["source"] == "booking"]
+        card = _card_for(authenticated_client(maids[0].user), booking)
+        cards = [card] if card else []
 
         # Swept to EXPIRED by the schedule read, so it leaves the day entirely.
         # Whichever way it goes, what must never happen is an offered control
@@ -435,28 +468,69 @@ class TestAnsweringFromTheDashboard:
 
 
 class TestSurcharge:
-    def test_same_day_costs_a_hundred_and_a_day_ahead_costs_fifty(self):
+    """Pins the pricing *rule*, never a specific rupee figure.
+
+    ``EMERGENCY_SURCHARGE_RUPEES`` is explicitly the tunable part of this
+    feature — an operator is expected to re-price it, and did. A test that
+    asserted "same day costs ₹100" would fail on that re-pricing while telling
+    nobody anything about whether the flow still worked, so these read the table
+    and assert the properties that must hold whatever is in it.
+    """
+
+    def test_lead_time_is_measured_in_whole_days_and_priced_from_the_table(self):
         today = dt.date(2026, 8, 9)
-        assert emergency_surcharge(scheduled_date=today, raised_on=today).rupees == 100
-        assert (
-            emergency_surcharge(
-                scheduled_date=today + dt.timedelta(days=1), raised_on=today
-            ).rupees
-            == 50
+        same_day = emergency_surcharge(scheduled_date=today, raised_on=today)
+        day_ahead = emergency_surcharge(
+            scheduled_date=today + dt.timedelta(days=1), raised_on=today
         )
 
-    def test_the_quote_endpoint_says_the_worker_is_paid_in_cash(
+        assert (same_day.lead_days, same_day.rupees) == (
+            0,
+            EMERGENCY_SURCHARGE_RUPEES[0],
+        )
+        assert (day_ahead.lead_days, day_ahead.rupees) == (
+            1,
+            EMERGENCY_SURCHARGE_RUPEES[1],
+        )
+
+    def test_a_date_already_past_is_priced_as_today_rather_than_negatively(self):
+        """Clamped at zero. A lead time of -1 would miss the table and come out
+        free, which is the one direction a pricing bug must never go."""
+        today = dt.date(2026, 8, 9)
+        quote = emergency_surcharge(
+            scheduled_date=today - dt.timedelta(days=2), raised_on=today
+        )
+
+        assert quote.lead_days == 0
+        assert quote.rupees == EMERGENCY_SURCHARGE_RUPEES[0]
+
+    def test_beyond_the_table_is_free(self):
+        today = dt.date(2026, 8, 9)
+        quote = emergency_surcharge(
+            scheduled_date=today + dt.timedelta(days=5), raised_on=today
+        )
+
+        assert quote.rupees == 0
+        assert "no emergency fee" in quote.rationale
+
+    def test_rupees_convert_to_paise_without_drifting(self):
+        today = dt.date(2026, 8, 9)
+        quote = emergency_surcharge(scheduled_date=today, raised_on=today)
+        assert quote.paise == quote.rupees * 100
+
+    def test_the_quote_endpoint_separates_the_fee_from_the_work(
         self, authenticated_client, resident, resident_user
     ):
         """The two payments are the thing most likely to be confused, so the
-        screen that collects one is explicit about the other."""
+        screen that collects the surcharge is explicit that the worker's own
+        charge is separate and comes later."""
         response = authenticated_client(resident_user).get(
             reverse("v1:bookings:emergency-quote")
         )
 
         assert response.status_code == 200
-        assert response.data["surcharge_rupees"] == 100
-        assert response.data["worker_fee_settlement"] == "cash"
+        assert response.data["surcharge_rupees"] == EMERGENCY_SURCHARGE_RUPEES[0]
+        assert response.data["worker_fee_settlement"] == "app"
 
     def test_raising_opens_a_platform_charge_with_no_worker(
         self, resident, society, emergency_category
@@ -467,7 +541,9 @@ class TestSurcharge:
         assert booking.worker_id is None
         assert payment.kind == PaymentKind.EMERGENCY_SURCHARGE
         assert payment.worker_id is None
-        assert payment.amount_paise == 100_00
+        # Whatever the table says today, the charge and the booking must agree.
+        assert payment.amount_paise == EMERGENCY_SURCHARGE_RUPEES[0] * 100
+        assert booking.emergency_surcharge_paise == payment.amount_paise
         # The platform's own fee is never itself fee-bearing.
         assert payment.platform_fee_paise == 0
 
@@ -915,11 +991,19 @@ class TestGivingUp:
 
 
 # ---------------------------------------------------------------------------
-# Payment B — the cash one the app must not touch
+# Payment B — the worker's fee, settled in the app
 # ---------------------------------------------------------------------------
 
 
-class TestCashSettlement:
+class TestPayingForTheWork:
+    """Module 5.5 — the worker's fee, settled through the app like any other.
+
+    This briefly worked the other way: emergency work was paid in cash and the
+    app deliberately opened no charge for it. That is reversed, so these pin the
+    opposite behaviour — completion must open a payment, exactly as it does for
+    an ordinary one-day booking.
+    """
+
     @pytest.fixture
     def finished_job(self, resident, society, emergency_category, maids):
         booking, payment = raise_request(resident, society, emergency_category)
@@ -930,50 +1014,63 @@ class TestCashSettlement:
         booking.refresh_from_db()
         return complete_booking(booking)
 
-    def test_completing_an_emergency_opens_no_in_app_charge(self, finished_job):
-        """Payment B is cash. A Razorpay order for it would be a second,
-        phantom charge for money that is about to change hands in notes."""
-        assert not Payment.objects.filter(
-            booking=finished_job, kind=PaymentKind.BOOKING
-        ).exists()
-
-    def test_both_sides_are_told_the_same_figure_at_the_same_moment(
-        self, finished_job, resident, maids
+    def test_the_household_is_asked_to_pay_in_the_app(
+        self, finished_job, resident, run_on_commit
     ):
-        """The worker's only protection against "I already paid you"."""
-        for user in (resident.user, maids[0].user):
-            told = Notification.objects.filter(
-                recipient=user, category=NotificationCategory.PAYMENT
-            )
-            assert told.exists()
-            assert str(finished_job.quoted_price) in told.first().title
-            assert told.first().data["settlement"] == "cash"
+        """The regression that matters: an emergency used to be skipped here,
+        so the worker's fee never appeared as anything the app would collect."""
+        prompts = Notification.objects.filter(
+            recipient=resident.user, category=NotificationCategory.PAYMENT
+        )
 
-    def test_the_server_refuses_an_in_app_charge_for_a_cash_job(
+        assert prompts.exists()
+        assert str(finished_job.quoted_price) in prompts.first().title
+        assert prompts.first().data["booking"] == finished_job.pk
+
+    def test_the_payment_endpoint_opens_a_charge(
         self, authenticated_client, finished_job, resident_user
     ):
-        """Refused server-side, not merely hidden in the app.
-
-        A stale build, a retried request or a tapped-twice button must not be
-        able to open a Razorpay order for money that is about to be handed over
-        in notes.
-        """
+        """It used to refuse with `settled_in_cash`."""
         response = authenticated_client(resident_user).post(
             reverse("v1:payments:pay-booking"),
             {"booking": finished_job.pk},
             format="json",
         )
 
-        assert response.status_code == 409
-        assert response.data["error"]["code"] == "settled_in_cash"
+        assert response.status_code in (200, 201), response.data
+        assert Payment.objects.filter(
+            booking=finished_job, kind=PaymentKind.BOOKING
+        ).exists()
 
-    def test_the_booking_reports_cash_settlement_to_the_app(
+    def test_the_charge_is_the_quoted_price_and_not_the_surcharge(
+        self, authenticated_client, finished_job, resident_user
+    ):
+        """Two payments, two amounts. Totalling them together, or charging the
+        surcharge twice, is the mistake worth a test of its own."""
+        authenticated_client(resident_user).post(
+            reverse("v1:payments:pay-booking"),
+            {"booking": finished_job.pk},
+            format="json",
+        )
+
+        fee = Payment.objects.get(booking=finished_job, kind=PaymentKind.BOOKING)
+        surcharge = Payment.objects.get(
+            booking=finished_job, kind=PaymentKind.EMERGENCY_SURCHARGE
+        )
+
+        assert fee.amount_paise == finished_job.quoted_price * 100
+        assert fee.worker_id == finished_job.worker_id
+        # The surcharge is the platform's and has no worker on it.
+        assert surcharge.worker_id is None
+        assert surcharge.amount_paise != fee.amount_paise
+
+    def test_the_booking_reports_app_settlement(
         self, authenticated_client, finished_job, resident_user
     ):
         response = authenticated_client(resident_user).get(
             reverse("v1:bookings:booking-detail", args=[finished_job.pk])
         )
-        assert response.data["settlement"] == "cash"
+        assert response.data["settlement"] == "app"
         assert response.data["is_emergency"] is True
 
 

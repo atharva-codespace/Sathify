@@ -106,7 +106,16 @@ class Routes {
   /// Module 5.5 — the resident raises an emergency, broadcast to whoever is
   /// free. Also the route the server puts on an offer notification, so a worker
   /// tapping one lands on her dashboard where the card is.
+  ///
+  /// Reached from the service catalogue: tapping an emergency category comes
+  /// here rather than to [bookSlot], because an emergency is not a slot-and-a-
+  /// worker to be chosen. Use [emergencyPath] to carry which category was
+  /// tapped.
   static const String emergency = '/emergency';
+
+  static String emergencyPath(int categoryId) =>
+      Uri(path: emergency, queryParameters: {'category': '$categoryId'})
+          .toString();
 
   static String bookSlotPath(int categoryId) => '/book/$categoryId';
 
@@ -384,11 +393,17 @@ final routerProvider = Provider<GoRouter>((ref) {
           // cards are.
           GoRoute(
             path: Routes.emergency,
-            builder: (_, __) {
+            builder: (_, goState) {
               final role = ref.read(authProvider).user?.role;
-              return role == UserRole.worker
-                  ? const MyScheduleScreen()
-                  : const RaiseEmergencyScreen();
+              if (role == UserRole.worker) return const MyScheduleScreen();
+              return RaiseEmergencyScreen(
+                // Which category was tapped in the catalogue. Absent when the
+                // route arrives from a notification, which the screen handles
+                // by asking.
+                categoryId: int.tryParse(
+                  goState.uri.queryParameters['category'] ?? '',
+                ),
+              );
             },
           ),
 

@@ -54,5 +54,14 @@ urlpatterns = [
     path("<uuid:pk>/receipt/", views.ReceiptView.as_view(), name="receipt"),
     path("<uuid:pk>/checkout/", views.CheckoutView.as_view(), name="checkout"),
     path("<uuid:pk>/confirm/", views.ConfirmCheckoutView.as_view(), name="confirm"),
+    # 8.9 — the UPI link/QR for this payment. Any payment, not only emergencies.
+    path("<uuid:pk>/upi/", views.PaymentUpiView.as_view(), name="payment-upi"),
+    # 8.9 — an administrator confirms the transfer arrived. The only settlement
+    # path in this module that is not backed by a verified signature.
+    path(
+        "<uuid:pk>/settle-upi/",
+        views.ConfirmUpiSettlementView.as_view(),
+        name="settle-upi",
+    ),
     path("<uuid:pk>/dispute/", views.RaiseDisputeView.as_view(), name="raise-dispute"),
 ]

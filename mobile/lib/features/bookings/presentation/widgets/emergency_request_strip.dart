@@ -116,7 +116,7 @@ class _RequestCardState extends ConsumerState<_RequestCard> {
           Icons.directions_walk_rounded,
           AppTone.success,
           '${booking.workerName} is on the way',
-          '₹${booking.quotedPrice} payable in cash when the job is done.',
+          '₹${booking.quotedPrice} payable in the app once the job is done.',
         ),
     };
 

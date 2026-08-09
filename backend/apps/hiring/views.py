@@ -74,7 +74,9 @@ from .serializers import (
     WorkerDetailSerializer,
     WorkerSearchResultSerializer,
 )
+from .settlement import outstanding_settlement, settlement_due
 from .services import (
+    DuesOutstanding,
     DuplicateEngagement,
     HiringError,
     NoticeTooShort,
@@ -671,6 +673,17 @@ class GiveNoticeView(APIView):
                     "notice_period_days": NOTICE_PERIOD_DAYS,
                 },
             )
+        except DuesOutstanding as exc:
+            # The figure travels with the refusal, so the app can put the
+            # breakdown straight in front of the resident rather than making a
+            # second round trip to find out what it is being asked for.
+            outstanding = outstanding_settlement(engagement)
+            return _error(
+                exc.code,
+                str(exc),
+                status.HTTP_409_CONFLICT,
+                details=outstanding.as_dict() if outstanding else {},
+            )
         except HiringError as exc:
             return _error(exc.code, str(exc), status.HTTP_409_CONFLICT)
 
@@ -685,6 +698,118 @@ class GiveNoticeView(APIView):
                     "all of them paid."
                 ),
             }
+        )
+
+
+@extend_schema(
+    tags=["Hiring"],
+    summary="What is owed before notice can be given",
+    responses=None,
+)
+class NoticeSettlementView(APIView):
+    """Module 4.6 — the pro-rata for this month, and the payment that clears it.
+
+    ``GET`` returns the breakdown to show the resident *before* they commit:
+    days worked, days scheduled, the rate, and the resulting amount. Every term
+    is exposed because this is the last money to change hands in a relationship
+    that is ending, and a figure nobody can account for at that moment is a
+    figure that turns into a complaint.
+
+    ``POST`` opens the ledger row for it. It does **not** settle it — that still
+    happens only through a verified Razorpay signature or a webhook, like every
+    other payment in Module 8.
+    """
+
+    permission_classes = [IsEngagementParty | IsApprovedSocietyAdmin]
+
+    def get(self, request, pk):
+        engagement = _engagement_queryset(request.user).filter(pk=pk).first()
+        if engagement is None:
+            return _error("not_found", "Engagement not found.", status.HTTP_404_NOT_FOUND)
+
+        breakdown = settlement_due(engagement)
+        outstanding = outstanding_settlement(engagement)
+        return Response(
+            {
+                **breakdown.as_dict(),
+                # Distinct from `amount_paise`: the pro-rata may be non-zero and
+                # yet nothing be owed, because a salary already paid this month
+                # covered it. A household must never be asked twice.
+                "is_outstanding": outstanding is not None,
+                "blocks_notice": outstanding is not None,
+            }
+        )
+
+    def post(self, request, pk):
+        from apps.payments.models import PaymentKind, PaymentStatus
+        from apps.payments.serializers import PaymentSerializer
+        from apps.payments.services import NothingToPay, create_payment
+
+        engagement = _engagement_queryset(request.user).filter(pk=pk).first()
+        if engagement is None:
+            return _error("not_found", "Engagement not found.", status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == Role.RESIDENT:
+            primary_resident_or_403(request.user)
+        elif request.user.role == Role.WORKER:
+            return _error(
+                "permission_denied",
+                "The household settles this, not the worker.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        outstanding = outstanding_settlement(engagement)
+        if outstanding is None:
+            return _error(
+                "nothing_to_pay",
+                "Nothing is outstanding for this month.",
+                status.HTTP_409_CONFLICT,
+                details=settlement_due(engagement).as_dict(),
+            )
+
+        # Idempotent on the engagement and month, like the booking payment: a
+        # resident re-opening the screen or retrying on a poor connection must
+        # resume the same row rather than opening a second demand for the same
+        # wages.
+        from apps.payments.models import Payment
+
+        existing = (
+            Payment.objects.filter(
+                engagement=engagement,
+                kind=PaymentKind.NOTICE_SETTLEMENT,
+                period_start=outstanding.month_start,
+            )
+            .exclude(status__in=[PaymentStatus.FAILED, PaymentStatus.CANCELLED])
+            .first()
+        )
+        if existing is not None:
+            return Response(
+                {"payment": PaymentSerializer(existing).data,
+                 "settlement": outstanding.as_dict()},
+                status=status.HTTP_200_OK,
+            )
+
+        try:
+            payment = create_payment(
+                resident=engagement.resident,
+                worker=engagement.worker,
+                society=engagement.society,
+                kind=PaymentKind.NOTICE_SETTLEMENT,
+                amount_paise=outstanding.amount_paise,
+                engagement=engagement,
+                period_start=outstanding.month_start,
+                period_end=outstanding.month_end,
+                note=outstanding.explain(),
+            )
+        except NothingToPay as exc:
+            return _error(exc.code, str(exc), status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "payment": PaymentSerializer(payment).data,
+                "settlement": outstanding.as_dict(),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

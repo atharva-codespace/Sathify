@@ -19,6 +19,14 @@ final unpaidPaymentsProvider = FutureProvider.autoDispose<List<Payment>>(
   },
 );
 
+/// Module 8.9 — the Razorpay-hosted UPI QR for one payment.
+///
+/// Keyed on the payment id and autoDisposed: the code is single-use and locked
+/// to that payment's exact amount, so it must never be shown for another one.
+final upiQrProvider = FutureProvider.autoDispose.family<UpiQr, String>(
+  (ref, paymentId) => ref.read(paymentRepositoryProvider).fetchUpiQr(paymentId),
+);
+
 /// Module 8.3 — one transaction's receipt.
 final receiptProvider = FutureProvider.autoDispose.family<Receipt, String>(
   (ref, paymentId) =>

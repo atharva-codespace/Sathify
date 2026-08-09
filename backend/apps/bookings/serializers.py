@@ -102,10 +102,22 @@ class BookingSerializer(serializers.ModelSerializer):
     is_emergency = serializers.BooleanField(read_only=True)
     seconds_left_to_claim = serializers.IntegerField(read_only=True)
 
+    #: Retained, and now always ``app``.
+    #:
+    #: Emergency work was briefly settled in cash. It is not any more — every
+    #: booking is paid through the app — so this has one value. Kept rather than
+    #: deleted because older app builds read it and default a missing key to
+    #: ``app`` anyway; removing it would change nothing for them and break
+    #: nothing here, but leaving it makes the contract explicit for a client
+    #: that still branches on it.
+    settlement = serializers.SerializerMethodField()
+
+    def get_settlement(self, obj) -> str:
+        return "app"
+
     end_time = serializers.TimeField(read_only=True)
     scheduled_start = serializers.DateTimeField(read_only=True)
     is_paid = serializers.SerializerMethodField()
-    settlement = serializers.SerializerMethodField()
 
     def get_worker_name(self, obj) -> str:
         return obj.worker.user.get_full_name() if obj.worker_id else ""
@@ -119,16 +131,6 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_worker_phone(self, obj) -> str:
         return obj.worker.user.phone_number if obj.worker_id else ""
-
-    def get_settlement(self, obj) -> str:
-        """How the worker's fee is paid: ``cash`` or ``app``.
-
-        Stated on every booking rather than inferred by the client from the
-        category, because getting it wrong in either direction is a payment bug:
-        an app charge on a cash job double-charges the household, and a cash
-        label on an app job leaves the worker unpaid.
-        """
-        return "cash" if obj.is_emergency else "app"
 
     def get_is_paid(self, obj) -> bool:
         """Whether a settled payment exists for this booking.

@@ -62,13 +62,6 @@ class ServiceCatalogueScreen extends ConsumerWidget {
               return CustomScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 slivers: [
-                  // Module 5.5 — the way out of this screen for somebody who
-                  // cannot use it. Choosing a category, then a date, then a
-                  // worker is three screens of decisions, and a household with
-                  // water coming through the ceiling has none to spare. It sits
-                  // above the grid because that is where somebody in a hurry
-                  // looks first.
-                  const SliverToBoxAdapter(child: AppFadeIn(child: _UrgentBanner())),
                   const SliverToBoxAdapter(
                     child: AppFadeIn(
                       child: AppSectionHeader(
@@ -117,65 +110,6 @@ class ServiceCatalogueScreen extends ConsumerWidget {
   }
 }
 
-/// The shortcut into Module 5.5's broadcast flow.
-class _UrgentBanner extends StatelessWidget {
-  const _UrgentBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AppSpacing.gutter,
-        AppSpacing.md,
-        AppSpacing.gutter,
-        0,
-      ),
-      child: AppCard(
-        onTap: () => context.push(Routes.emergency),
-        child: Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: const BoxDecoration(
-                color: AppColors.dangerSoft,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.bolt_rounded,
-                size: AppIconSize.md,
-                color: AppColors.danger,
-              ),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Need someone right now?',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Sent to everyone free nearby. No need to choose.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: AppColors.textTertiary,
-              size: AppIconSize.md,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _CategoryCard extends StatelessWidget {
   const _CategoryCard({required this.category});
 
@@ -185,8 +119,28 @@ class _CategoryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    // -------------------------------------------------------------------
+    // AN EMERGENCY CATEGORY IS A DIFFERENT KIND OF THING TO TAP
+    // -------------------------------------------------------------------
+    // Every other card leads to "pick a date, pick a time, pick a worker".
+    // That sequence is the whole value of the ordinary flow and exactly the
+    // wrong thing to ask of somebody with water coming through a ceiling — and
+    // when it *was* asked, it produced a request aimed at one worker who might
+    // never answer, which is the shape that was reported broken.
+    //
+    // So the card stays in the catalogue where people look for it, and it goes
+    // somewhere else: straight to the broadcast, where the only decision left
+    // is whether to send it. The server refuses a directed booking for these
+    // categories, so this is the routing that matches the rule rather than a
+    // convention the client is trusted to keep.
+    final isEmergency = category.bypassesNoticePeriod;
+
     return AppCard(
-      onTap: () => context.push(Routes.bookSlotPath(category.id)),
+      onTap: () => context.push(
+        isEmergency
+            ? Routes.emergencyPath(category.id)
+            : Routes.bookSlotPath(category.id),
+      ),
       padding: const EdgeInsets.all(AppSpacing.sm),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -196,18 +150,20 @@ class _CategoryCard extends StatelessWidget {
               Container(
                 width: 46,
                 height: 46,
-                decoration: const BoxDecoration(
-                  color: AppColors.primarySoft,
+                decoration: BoxDecoration(
+                  color: isEmergency
+                      ? AppColors.dangerSoft
+                      : AppColors.primarySoft,
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
                   iconForCategory(category.icon),
                   size: AppIconSize.lg - 2,
-                  color: AppColors.primary,
+                  color: isEmergency ? AppColors.danger : AppColors.primary,
                 ),
               ),
               const Spacer(),
-              if (category.bypassesNoticePeriod)
+              if (isEmergency)
                 const AppStatusChip(
                   label: 'Urgent',
                   tone: AppTone.danger,
@@ -224,7 +180,11 @@ class _CategoryCard extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(
-            'About ${category.durationLabel}',
+            // Says what tapping this does, because for one of these cards it is
+            // not what the rest of the grid has trained the eye to expect.
+            isEmergency
+                ? 'Sent to everyone free now'
+                : 'About ${category.durationLabel}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: theme.textTheme.bodySmall,
@@ -236,10 +196,10 @@ class _CategoryCard extends StatelessWidget {
                 : '₹${category.priceMin}–₹${category.priceMax}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w700,
-              color: AppColors.primary,
+              color: isEmergency ? AppColors.danger : AppColors.primary,
             ),
           ),
         ],

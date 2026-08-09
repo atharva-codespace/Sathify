@@ -85,6 +85,34 @@ def engagement(society, resident, worker, maid_service):
     )
 
 
+@pytest.fixture
+def dues_settled(engagement):
+    """This month's wages already paid, so notice is not gated on money.
+
+    Module 4.6 refuses a *household* notice while the days already worked this
+    month are unpaid, and a long-running engagement always has some (see
+    ``hiring/settlement.py`` — a scheduled day counts unless leave says
+    otherwise). That gate has its own tests in ``test_settlement.py``; the ones
+    here are about the notice mechanics, so they start from a household that is
+    square rather than re-testing the gate by accident.
+
+    A full month's salary is used rather than the exact pro-rata so the fixture
+    cannot drift out of date as the arithmetic changes.
+    """
+    from apps.payments.models import Payment, PaymentKind, PaymentStatus
+
+    return Payment.objects.create(
+        society=engagement.society,
+        resident=engagement.resident,
+        worker=engagement.worker,
+        engagement=engagement,
+        kind=PaymentKind.ENGAGEMENT_SALARY,
+        amount_paise=engagement.monthly_rate * 100,
+        status=PaymentStatus.PAID,
+        paid_at=timezone.now(),
+    )
+
+
 class TestNoticeIsServed:
     def test_ten_days_is_the_floor(self, engagement, resident_user):
         leave_on = timezone.localdate() + dt.timedelta(days=3)
@@ -355,7 +383,7 @@ class TestNoticeProtectsTheTrustScore:
         assert self.abandoned_count(worker) == 0
 
     def test_the_household_ending_it_never_marks_the_worker(
-        self, engagement, worker, resident_user
+        self, engagement, worker, resident_user, dues_settled
     ):
         """A resident letting somebody go says nothing about the worker."""
         give_notice(
@@ -402,7 +430,7 @@ class TestNoticeApi:
         assert response.data["engagement"]["status"] == EngagementStatus.ACTIVE
 
     def test_a_resident_gives_notice(
-        self, authenticated_client, resident_user, engagement
+        self, authenticated_client, resident_user, engagement, dues_settled
     ):
         response = authenticated_client(resident_user).post(
             self.url(engagement.pk),

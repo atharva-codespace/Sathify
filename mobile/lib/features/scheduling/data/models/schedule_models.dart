@@ -153,11 +153,12 @@ class ScheduleItem {
   /// re-derive it here — that is precisely the mistake being undone.
   final bool canMarkDone;
 
-  /// `app` or `cash`. An emergency job's fee is paid hand to hand, so the card
-  /// must not tell her the household is about to be asked for money.
+  /// How the worker's fee is settled. Always `app` — emergency work was briefly
+  /// paid in cash and no longer is, so every visit is paid the same way.
   final String settlement;
 
-  /// Paid directly in cash, outside the app.
+  /// Always false now — every visit is paid through the app.
+  @Deprecated('All visits settle in-app. Remove branches on this.')
   bool get isCashSettled => settlement == 'cash';
 
   /// The worker has marked the day's work done.

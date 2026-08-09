@@ -68,8 +68,10 @@ class _BookSlotScreenState extends ConsumerState<BookSlotScreen> {
     final picked = await showDatePicker(
       context: context,
       initialDate: _date ?? now.add(const Duration(days: 1)),
-      // Today is selectable: an emergency category may be booked for today,
-      // and the server is the authority on whether the notice window allows it.
+      // Today stays selectable even though this screen no longer serves
+      // emergencies (those broadcast instead, from the catalogue card): a
+      // society may set a short notice window, and the server is the authority
+      // on whether today is allowed rather than this picker.
       firstDate: DateTime(now.year, now.month, now.day),
       lastDate: now.add(const Duration(days: 90)),
     );

@@ -5,6 +5,8 @@ import '../../../../core/errors/api_exception.dart';
 import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
+import '../../../payments/presentation/providers/payment_provider.dart';
+import '../../../payments/presentation/widgets/pay_sheet.dart';
 import '../../data/models/hiring_models.dart';
 import '../providers/hiring_provider.dart';
 
@@ -117,12 +119,33 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
   /// the gate still admits the worker, and every one of those days is paid.
   /// This is the button people should reach for, which is why it is the plain
   /// one and `_terminate` below is not.
+  /// -----------------------------------------------------------------------
+  /// A HOUSEHOLD SETTLES THIS MONTH FIRST
+  /// -----------------------------------------------------------------------
+  /// Module 4.6. Before notice takes effect the resident pays for the days
+  /// already worked this month, and the breakdown is shown before they commit —
+  /// days worked, days in the month, the rate, the amount — because this is
+  /// the last money to move in a relationship that is ending and an unexplained
+  /// figure at that moment turns into a dispute.
+  ///
+  /// The order is: show, pay, *then* notice. The server enforces the same
+  /// order and refuses with `dues_outstanding`, so a stale build cannot end an
+  /// arrangement with wages unpaid.
+  ///
+  /// A **worker** giving notice skips all of it. She is owed the money either
+  /// way, but making it harder for her to resign is how you get somebody who
+  /// stops turning up instead of giving notice — see the note in
+  /// `hiring/services.give_notice`.
   Future<void> _giveNotice() async {
     final reason = await showDialog<EngagementEndReason>(
       context: context,
       builder: (_) => _EndReasonDialog(isWorker: widget.isWorker),
     );
     if (reason == null) return;
+    if (!mounted) return;
+
+    if (!widget.isWorker && !await _settleDues()) return;
+    if (!mounted) return;
 
     final lastDay = NoticePeriod.earliestLastDay(DateTime.now());
     await _run(
@@ -131,6 +154,86 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
           .giveNotice(widget.engagement.id, reason: reason),
       'Notice given. The last working day is ${_formatDate(lastDay)}.',
     );
+  }
+
+  /// Shows what is owed and collects it. Returns whether notice may proceed.
+  ///
+  /// True when there was nothing to pay as well as when payment succeeded —
+  /// a household that already paid this month's salary is square, and asking
+  /// again would charge twice for the same work.
+  Future<bool> _settleDues() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final repository = ref.read(hiringRepositoryProvider);
+    setState(() => _isBusy = true);
+
+    final NoticeSettlement settlement;
+    try {
+      settlement = await repository.fetchNoticeSettlement(widget.engagement.id);
+    } on ApiException catch (error) {
+      if (!mounted) return false;
+      setState(() => _isBusy = false);
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
+      return false;
+    }
+
+    if (!mounted) return false;
+    setState(() => _isBusy = false);
+
+    if (!settlement.isOutstanding) {
+      // Nothing owed, or already covered by a salary paid this month. Say so
+      // rather than passing silently — "you owe nothing" is information the
+      // resident wants at exactly this moment.
+      showAppSnackBarOn(
+        messenger,
+        settlement.amountPaise > 0
+            ? 'This month is already paid up.'
+            : 'Nothing is owed for this month.',
+        tone: AppTone.info,
+      );
+      return true;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => _SettlementDialog(
+        settlement: settlement,
+        workerName: widget.engagement.workerName,
+      ),
+    );
+    if (confirmed != true || !mounted) return false;
+
+    setState(() => _isBusy = true);
+    try {
+      final paymentId =
+          await repository.openNoticeSettlement(widget.engagement.id);
+      final payment =
+          await ref.read(paymentRepositoryProvider).fetchPayment(paymentId);
+      if (!mounted) return false;
+      setState(() => _isBusy = false);
+
+      final outcome = await showPaySheet(context, payment);
+      if (!mounted) return false;
+      invalidatePayments(ref);
+
+      if (outcome == PayOutcome.paid) return true;
+
+      // A UPI transfer has not settled when the sheet closes, and the server
+      // gates notice on a *settled* payment. Telling the resident notice is
+      // given here would be a promise the next screen would contradict.
+      showAppSnackBarOn(
+        messenger,
+        outcome == PayOutcome.pendingUpi
+            ? 'Finish in your UPI app, then give notice again once it clears.'
+            : 'Notice not given — the settlement is still unpaid.',
+        tone: AppTone.warning,
+      );
+      return false;
+    } on ApiException catch (error) {
+      if (!mounted) return false;
+      setState(() => _isBusy = false);
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
+      return false;
+    }
   }
 
   Future<void> _withdrawNotice() => _run(
@@ -388,6 +491,135 @@ class _DetailRow extends StatelessWidget {
           Icon(icon, size: 18, color: AppColors.textSecondary),
           const SizedBox(width: 10),
           Expanded(child: Text(text, style: const TextStyle(fontSize: 14))),
+        ],
+      ),
+    );
+  }
+}
+
+/// Module 4.6 — the pro-rata, shown as a division rather than an answer.
+///
+/// A resident ending an arrangement is about to be asked for money at the least
+/// convenient possible moment. The one thing that makes that land as fair
+/// rather than as a parting charge is being able to see where the number came
+/// from — so the days, the denominator and the rate are all on screen, above
+/// the total, in that order.
+class _SettlementDialog extends StatelessWidget {
+  const _SettlementDialog({
+    required this.settlement,
+    required this.workerName,
+  });
+
+  final NoticeSettlement settlement;
+  final String workerName;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final who = workerName.isEmpty ? 'your helper' : workerName;
+
+    return AlertDialog(
+      title: const Text('Settle this month first'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$who has already worked part of this month. That is paid before '
+            'notice starts.',
+            style: theme.textTheme.bodyMedium,
+          ),
+          const SizedBox(height: AppSpacing.md),
+          // In the order the sum is done, so the total below can be checked
+          // by eye: worked ÷ days in month × rate.
+          _Line(
+            label: 'Days worked',
+            value: '${settlement.daysWorked}',
+          ),
+          _Line(
+            label: 'Days in ${_monthName(settlement)}',
+            value: '${settlement.daysInMonth}',
+          ),
+          _Line(
+            label: 'Monthly rate',
+            value: settlement.monthlyRateDisplay,
+          ),
+          if (settlement.scheduledDays > 0)
+            _Line(
+              label: 'Visits scheduled this month',
+              value: '${settlement.scheduledDays}',
+            ),
+          const Divider(height: AppSpacing.lg),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Amount due', style: theme.textTheme.titleSmall),
+              Text(
+                settlement.amountDisplay,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+            ],
+          ),
+          if (settlement.explanation.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              // The server's own wording, so the app and the server can never
+              // disagree about how the figure was reached.
+              settlement.explanation,
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Not now'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: Text('Pay ${settlement.amountDisplay}'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The month the settlement covers, e.g. "August".
+String _monthName(NoticeSettlement settlement) {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  final now = DateTime.now();
+  return months[now.month - 1];
+}
+
+class _Line extends StatelessWidget {
+  const _Line({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              color: AppColors.textPrimary,
+            ),
+          ),
         ],
       ),
     );

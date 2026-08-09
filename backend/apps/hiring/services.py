@@ -422,6 +422,16 @@ class NoticeAlreadyGiven(HiringError):
     code = "notice_already_given"
 
 
+class DuesOutstanding(HiringError):
+    """This month's worked days have not been settled yet (Module 4.6).
+
+    Raised only against the **household**. See :func:`give_notice` for why the
+    gate is one-sided.
+    """
+
+    code = "dues_outstanding"
+
+
 def earliest_last_working_day(*, today=None) -> dt.date:
     """The soonest an engagement may end. Mirrored by ``NoticePeriod`` in Dart."""
     return (today or timezone.localdate()) + dt.timedelta(days=NOTICE_PERIOD_DAYS)
@@ -438,9 +448,29 @@ def give_notice(engagement, *, by, reason: str = "", requested_last_day=None):
     The engagement stays ACTIVE and its schedule keeps producing visits. Nothing
     about the gate, attendance or payments changes until the last working day
     passes.
+
+    -------------------------------------------------------------------------
+    A HOUSEHOLD SETTLES THIS MONTH BEFORE IT CAN GIVE NOTICE
+    -------------------------------------------------------------------------
+    Module 4.6. The days already worked this month are paid first, and the
+    figure is ``hiring.settlement.settlement_due``.
+
+    **The gate is one-sided, deliberately.** A *worker* giving notice is never
+    blocked by it, for exactly the reason the notice period itself carries no
+    penalty (see the note above this section): making it expensive or difficult
+    to leave does not produce notice, it produces people who stop turning up.
+    A worker leaving is still owed the money — the debt is unchanged and the
+    settlement endpoint still opens — she simply does not have to collect it
+    before she is allowed to resign.
     """
+    from .settlement import outstanding_settlement
+
     locked = Engagement.objects.select_for_update().get(pk=engagement.pk)
 
+    # Validity first, money second. Both orders refuse the same requests, but
+    # only this one refuses them in a useful order: asking a household to settle
+    # a month's wages and *then* telling them the date they picked was never
+    # allowed is a bill collected for a request that was going to fail anyway.
     if locked.status != EngagementStatus.ACTIVE:
         raise RequestNotActionable(
             "Only an active engagement can be given notice."
@@ -459,6 +489,15 @@ def give_notice(engagement, *, by, reason: str = "", requested_last_day=None):
             f"The agreed notice period is {NOTICE_PERIOD_DAYS} days, so the "
             f"earliest last day is {earliest:%d %b %Y}."
         )
+
+    if by != locked.worker.user:
+        outstanding = outstanding_settlement(locked)
+        if outstanding is not None:
+            raise DuesOutstanding(
+                f"₹{outstanding.amount_paise // 100} is owed for "
+                f"{outstanding.days_worked} day(s) worked this month. Settle it "
+                "before giving notice."
+            )
 
     locked.notice_given_at = timezone.now()
     locked.notice_given_by = by

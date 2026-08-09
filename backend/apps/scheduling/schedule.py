@@ -127,8 +127,9 @@ class ScheduleItem:
     #: refusal is also decided, so the button and the endpoint cannot disagree.
     can_mark_done: bool = False
 
-    #: How the worker's fee is settled: ``app`` or ``cash``. An emergency is
-    #: cash, hand to hand, and the card must not offer to collect it.
+    #: How the worker's fee is settled. Always ``app`` — emergency work was
+    #: briefly settled in cash and no longer is, so every visit is paid the same
+    #: way. Kept as a field because the client still reads it.
     settlement: str = "app"
 
     # --- 6.7 what this visit is worth ---------------------------------------
@@ -574,7 +575,6 @@ def _booking_item(booking, progress=None, completion=None) -> ScheduleItem:
         # Straight off the booking, so the schedule card and the completion
         # endpoint answer to the same rule. See ``Booking.can_be_completed``.
         can_mark_done=completion is None and booking.can_be_completed,
-        settlement="cash" if booking.is_emergency else "app",
         **(progress or {}),
     )
 

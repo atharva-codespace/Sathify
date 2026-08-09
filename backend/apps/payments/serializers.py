@@ -169,6 +169,28 @@ class CheckoutPayloadSerializer(serializers.Serializer):
     test_mode = serializers.BooleanField(read_only=True)
 
 
+class ConfirmUpiSettlementSerializer(serializers.Serializer):
+    """Module 8.9 — what an administrator reads off a bank statement.
+
+    ``amount_paise`` is required rather than assumed from the payment. Asking
+    for the figure they can see, and refusing when it disagrees, is what makes
+    this a *reconciliation* rather than a button that marks things paid — the
+    administrator has to have actually looked.
+    """
+
+    utr = serializers.CharField(
+        max_length=40,
+        help_text="The bank's transaction reference. One UTR settles one payment.",
+    )
+    amount_paise = serializers.IntegerField(
+        min_value=1,
+        help_text="The amount shown on the statement, in paise. Must match.",
+    )
+    note = serializers.CharField(
+        required=False, allow_blank=True, max_length=300, default=""
+    )
+
+
 class ConfirmCheckoutSerializer(serializers.Serializer):
     """The signed response Razorpay Checkout hands back to the app.
 

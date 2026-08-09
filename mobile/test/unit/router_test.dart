@@ -97,6 +97,10 @@ void main() {
         Routes.workerHome,
         Routes.guardHome,
         Routes.adminHome,
+        // Module 5.5. Also the route the server puts on an emergency offer
+        // notification, so an unregistered one would send a worker with a job
+        // waiting to the not-found screen.
+        Routes.emergency,
       ]) {
         expect(
           router.configuration.findMatch(Uri.parse(location)),
@@ -114,6 +118,11 @@ void main() {
         Routes.complaintPath(3),
         Routes.workerDetailPath(11),
         Routes.receiptPath('abc'),
+        // Module 5.5 — how the catalogue's emergency card enters the broadcast
+        // flow. It carries the category as a query parameter rather than a path
+        // segment precisely so the bare `/emergency` from a notification still
+        // matches the same route.
+        Routes.emergencyPath(4),
       ]) {
         expect(
           router.configuration.findMatch(Uri.parse(location)),
@@ -121,6 +130,16 @@ void main() {
           reason: '$location does not match any GoRoute',
         );
       }
+    });
+
+    test('the emergency path carries the category it was raised from', () {
+      // The screen narrows to one service from this, so a helper that dropped
+      // it would silently put the resident back to choosing.
+      expect(
+        Uri.parse(Routes.emergencyPath(4)).queryParameters['category'],
+        '4',
+      );
+      expect(Uri.parse(Routes.emergencyPath(4)).path, Routes.emergency);
     });
   });
 

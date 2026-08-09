@@ -44,6 +44,14 @@ urlpatterns = [
         name="engagement-notice-withdraw",
     ),
     path(
+        # 4.6 — the pro-rata owed before notice can be given, and the payment
+        # that clears it. Declared before "transition/" for readability only;
+        # both are literals so the order does not matter here.
+        "engagements/<int:pk>/settlement/",
+        views.NoticeSettlementView.as_view(),
+        name="engagement-settlement",
+    ),
+    path(
         "engagements/<int:pk>/transition/",
         views.EngagementTransitionView.as_view(),
         name="engagement-transition",

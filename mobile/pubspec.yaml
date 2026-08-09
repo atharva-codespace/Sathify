@@ -69,7 +69,6 @@ dependencies:
   # else. Bump this only when the SDK bumps its own pin.
   intl: ^0.20.2
   cached_network_image: ^3.4.1
-
 dev_dependencies:
   flutter_test:
     sdk: flutter

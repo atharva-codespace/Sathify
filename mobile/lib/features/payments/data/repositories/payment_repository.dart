@@ -130,6 +130,22 @@ class PaymentRepository {
     return Payment.fromJson(response['payment'] as Map<String, dynamic>);
   }
 
+  /// Module 8.9 — a Razorpay-hosted UPI QR for a payment.
+  ///
+  /// Opens one server-side if there is no live code, and reuses the existing one
+  /// otherwise, so re-opening the sheet does not invalidate a code somebody has
+  /// already photographed.
+  ///
+  /// A 503 means Razorpay is unconfigured or unreachable. Callers treat that as
+  /// "hide the QR and offer in-app checkout" rather than as an error worth
+  /// showing — a broken image where a payment instruction should be is worse
+  /// than no QR at all.
+  Future<UpiQr> fetchUpiQr(String paymentId) async {
+    final response = await _client.get(ApiEndpoints.paymentUpi(paymentId))
+        as Map<String, dynamic>;
+    return UpiQr.fromJson(response);
+  }
+
   /// Opens the Razorpay order server-side and returns the checkout payload.
   Future<CheckoutPayload> openCheckout(String paymentId) async {
     final response = await _client.post(ApiEndpoints.paymentCheckout(paymentId))

@@ -81,6 +81,7 @@ from .serializers import (
 from .services import (
     BookingError,
     BookingNotActionable,
+    EmergencyMustBroadcast,
     NoticeTooShort,
     SlotConflict,
     WorkerUnavailable,
@@ -101,6 +102,9 @@ _CONFLICT_ERRORS = (
     SlotConflict,
     BookingNotActionable,
     WorkerUnavailable,
+    # Not the caller's mistake so much as the wrong door: the request is
+    # well-formed, it just has to go through the broadcast flow.
+    EmergencyMustBroadcast,
     # Losing the race for an emergency is a 409: the request was well-formed and
     # arrived a moment too late. It must never read as a 400, because the app
     # shows a 400 as "you did something wrong" and she did not.
@@ -494,11 +498,13 @@ class EmergencySurchargeQuoteView(APIView):
                 "rationale": quote.rationale,
                 # Said explicitly, on the screen where the household is about to
                 # be charged, so nobody can be surprised later by a second
-                # payment they were not expecting.
-                "worker_fee_settlement": "cash",
+                # payment they were not expecting. It is a *different* amount at
+                # a *different* time, and that is the whole point of saying it.
+                "worker_fee_settlement": "app",
                 "worker_fee_note": (
                     "This fee is Sathify's, for finding somebody quickly. The "
-                    "worker's own charge is paid directly to them in cash."
+                    "worker's own charge is separate, and you are asked for it "
+                    "in the app once the job is done."
                 ),
             }
         )

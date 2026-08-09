@@ -359,7 +359,16 @@ class TestConflictDetection:
         """The delegation to Module 6 must not have loosened Module 5's guard."""
         from apps.bookings.models import DayAvailability
 
-        future_monday = timezone.localdate() + dt.timedelta(days=(7 - timezone.localdate().weekday()) % 7 or 7)
+        # A Monday at least a week out, never merely "the next one".
+        #
+        # This used to take the nearest future Monday, which on a Sunday is
+        # tomorrow — and after about 22:00 that is inside the society's 12-hour
+        # notice window, so the booking was refused with `notice_too_short`
+        # before it ever reached the conflict check this test is about. It
+        # passed all day and failed late on Sundays, which is the worst kind of
+        # flake to debug because the code under test is innocent.
+        today = timezone.localdate()
+        future_monday = today + dt.timedelta(days=((7 - today.weekday()) % 7) + 7)
         DayAvailability.objects.create(worker=worker, date=future_monday, is_available=True)
         make_engagement(
             society, resident, worker, maid_service,

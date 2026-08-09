@@ -16,12 +16,43 @@ module the arbiter of a dispute it cannot see the facts of. The figures are
 shown, the arithmetic is explained, and a person presses the button.
 
 -------------------------------------------------------------------------------
-PAID IS ONLY EVER REACHED THROUGH A VERIFIED SIGNATURE
+HOW A PAYMENT REACHES PAID — THREE PATHS, AND WHY THE THIRD EXISTS
 -------------------------------------------------------------------------------
-Two paths settle a payment, and both check an HMAC first: the client handing
-back a signed Razorpay Checkout response, and a webhook. There is deliberately
-no third path — no admin action, no client assertion, nothing that would let a
-payment be marked paid because someone said so.
+**Two are gateway paths, and both check an HMAC first**: the client handing back
+a signed Razorpay Checkout response, and a webhook. Nothing a client asserts
+about its own success is trusted, because the client is the party that benefits
+from lying about it. That has not changed.
+
+**The third is UPI reconciliation, and it is a deliberate reversal.** This file
+used to say there was "no third path — no admin action, no client assertion,
+nothing that would let a payment be marked paid because someone said so", and
+that was the right rule for a system where every rupee moved through Razorpay.
+
+Module 8.9 broke that assumption. A UPI QR collects straight into a VPA, which
+means real money can arrive with **no callback of any kind** — no signature to
+verify, because no gateway was involved. Holding the old line would not have
+kept anything safe; it would have meant a household pays, the money lands in the
+bank account, and the app says "unpaid" forever. For an emergency that is worse
+than useless: the broadcast is triggered by settlement, so the request would
+never reach a single worker.
+
+So the third path exists, and the honesty is moved rather than abandoned. It is
+not "an admin may mark things paid":
+
+* only a society administrator, only within their own society;
+* only against an unsettled payment;
+* the amount observed must equal what the payment asked for, checked through
+  :func:`upi.reconcile_reference`;
+* the bank's UTR is required and is **unique across the ledger**, so one line on
+  a statement can settle at most one payment;
+* who confirmed it, when, and against which UTR are all stored as evidence, in
+  the same spirit as ``WebhookEvent`` — applying and forgetting would leave only
+  the conclusion.
+
+The signature is replaced by a named human and a bank reference that can be
+checked against a statement. That is a weaker guarantee than an HMAC and it is
+recorded as such: ``Payment.settled_via`` says which path settled every row, so
+nobody has to guess later which ones rest on a person's word.
 """
 
 from __future__ import annotations
@@ -43,6 +74,8 @@ from .models import (
     Payment,
     PaymentKind,
     PaymentStatus,
+    SettledVia,
+    UpiSettlement,
     WebhookEvent,
     rupees_to_paise,
 )
@@ -476,6 +509,108 @@ def _notify_worker_paid(payment: Payment) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 8.9 UPI reconciliation
+# ---------------------------------------------------------------------------
+
+
+class AmountMismatch(PaymentError):
+    code = "amount_mismatch"
+
+
+class UtrAlreadyUsed(PaymentError):
+    code = "utr_already_used"
+
+
+#: Loosest defensible shape for a UTR. NPCI's is 12 alphanumerics; banks print
+#: NEFT/IMPS references of other lengths, and refusing a genuine one an operator
+#: is reading off a statement helps nobody. Long enough that a blank, a dash or
+#: "paid" cannot pass as evidence.
+MIN_UTR_LENGTH = 6
+
+
+@transaction.atomic
+def confirm_upi_settlement(
+    payment: Payment, *, utr: str, amount_paise: int, confirmed_by, note: str = ""
+) -> Payment:
+    """An administrator confirms a UPI transfer against a bank statement.
+
+    The third settlement path. See this module's docstring for why it exists and
+    what stands in for the missing signature; the short version is that a UPI QR
+    collects into a VPA with no callback at all, so without this a household can
+    pay and the app says "unpaid" forever.
+
+    Every guard here is doing a specific job:
+
+    * **Already settled** returns the row rather than raising. Two administrators
+      working the same statement is a normal Monday, not an error.
+    * **The amount must match**, checked through :func:`upi.reconcile_reference`
+      — the same function and the same rule the QR path uses, so there is one
+      answer to "does this bank line belong to this payment".
+    * **The UTR is unique across the ledger**, so one line on a statement cannot
+      clear several charges. Enforced by the database; the check here only turns
+      the collision into a readable refusal.
+    * ``on_payment_settled`` still runs, which is what makes a reconciled
+      emergency surcharge actually broadcast and a worker actually get told.
+    """
+    from . import upi
+
+    locked = Payment.objects.select_for_update().get(pk=payment.pk)
+
+    if locked.is_settled:
+        return locked
+
+    if locked.status in {PaymentStatus.REFUNDED, PaymentStatus.CANCELLED}:
+        raise PaymentError("This payment is closed and cannot be settled.")
+
+    reference = (utr or "").strip().upper()
+    if len(reference) < MIN_UTR_LENGTH:
+        raise PaymentError(
+            "Enter the bank's transaction reference (UTR) for this transfer."
+        )
+
+    # The same match rule the QR path documents. An old QR re-scanned for a
+    # different sum presents its original amount and fails here.
+    if upi.reconcile_reference(reference=str(locked.pk), amount_paise=amount_paise) is None:
+        raise AmountMismatch(
+            f"The statement shows {amount_paise} paise but this payment is for "
+            f"{locked.total_paise}. Confirm you are looking at the right line."
+        )
+
+    if UpiSettlement.objects.filter(utr=reference).exists():
+        raise UtrAlreadyUsed(
+            f"UTR {reference} has already been used to settle another payment."
+        )
+
+    UpiSettlement.objects.create(
+        payment=locked,
+        utr=reference,
+        amount_paise=amount_paise,
+        confirmed_by=confirmed_by,
+        note=note[:300],
+    )
+    locked.mark_paid(
+        # No gateway payment id exists — the money never went through one. The
+        # UTR is the bank's identifier and belongs in the audit trail, so it is
+        # recorded here rather than left blank and looked up through a join.
+        razorpay_payment_id="",
+        signature="",
+        via=SettledVia.UPI_MANUAL,
+    )
+
+    on_payment_settled(locked)
+
+    logger.warning(
+        # Warning rather than info, deliberately. This is the one settlement
+        # that rests on a person rather than a signature, and a run of them is
+        # something an operator should be able to see in a log without looking
+        # for it.
+        "Payment %s settled MANUALLY by user %s against UTR %s",
+        locked.receipt_number, confirmed_by.pk, reference,
+    )
+    return locked
+
+
+# ---------------------------------------------------------------------------
 # Refunds
 # ---------------------------------------------------------------------------
 
@@ -550,6 +685,61 @@ def _payment_for_event(entity: dict) -> Payment | None:
     return None
 
 
+def _payment_for_qr_event(payload: dict) -> Payment | None:
+    """Find the row a ``qr_code.*`` webhook refers to.
+
+    Needs its own resolver because a QR payment has **no order**, and Razorpay
+    does not put the QR id on the payment entity — it is on the sibling
+    ``qr_code`` entity. So :func:`_payment_for_event` cannot see it, and a QR
+    credit resolved through that function would silently match nothing.
+
+    Two routes home, in order of reliability:
+
+    1. the QR code id, which we stored when we opened it, and
+    2. the ``reference`` we put in ``notes``, which Razorpay echoes on both
+       entities — the fallback for a code opened before the id column existed,
+       or restored from a backup.
+    """
+    qr_entity = payload.get("payload", {}).get("qr_code", {}).get("entity", {})
+    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+
+    qr_id = qr_entity.get("id") or ""
+    if qr_id:
+        found = Payment.objects.filter(razorpay_qr_code_id=qr_id).first()
+        if found is not None:
+            return found
+
+    notes = qr_entity.get("notes") or payment_entity.get("notes") or {}
+    reference = notes.get("reference") or ""
+    if reference:
+        return Payment.objects.filter(pk=reference).first()
+    return None
+
+
+def _payment_for_link_event(payload: dict) -> Payment | None:
+    """Find the row a ``payment_link.*`` webhook refers to.
+
+    A third resolver, for the same reason there is a second: a payment link
+    creates *its own* Razorpay order, so the ``order_id`` on the payment entity
+    is one we have never seen and ``_payment_for_event`` would match nothing.
+
+    ``reference_id`` is tried first because we set it to the ``Payment`` id when
+    the link was opened, and it survives even if the link row is later reissued.
+    """
+    link_entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+
+    reference = link_entity.get("reference_id") or ""
+    if reference:
+        found = Payment.objects.filter(pk=reference).first()
+        if found is not None:
+            return found
+
+    link_id = link_entity.get("id") or ""
+    if link_id:
+        return Payment.objects.filter(razorpay_payment_link_id=link_id).first()
+    return None
+
+
 @transaction.atomic
 def apply_webhook(event: WebhookEvent) -> Payment | None:
     """Apply a verified webhook to the ledger.
@@ -559,14 +749,20 @@ def apply_webhook(event: WebhookEvent) -> Payment | None:
     recognised before this runs, and ``mark_paid`` is itself idempotent for the
     case where two different events both report success.
     """
-    payload = event.payload or {}
-    entity = (
-        payload.get("payload", {}).get("payment", {}).get("entity", {})
-        if isinstance(payload, dict)
-        else {}
-    )
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
 
-    payment = _payment_for_event(entity)
+    # Three ways a payment finds its row, because Razorpay's three objects carry
+    # our identifier in three different places. Both of the scan paths would
+    # resolve to nothing through `_payment_for_event`, which is what would leave
+    # a scanned payment stranded.
+    if event.event_type.startswith("qr_code."):
+        payment = _payment_for_qr_event(payload)
+    elif event.event_type.startswith("payment_link."):
+        payment = _payment_for_link_event(payload)
+    else:
+        payment = _payment_for_event(entity)
+
     if payment is None:
         # Worth recording rather than swallowing: a payment event with no
         # matching row means either a stray webhook or a lost order id.
@@ -577,11 +773,24 @@ def apply_webhook(event: WebhookEvent) -> Payment | None:
     event.payment = payment
     event.save(update_fields=["payment", "updated_at"])
 
-    if event.event_type in {"payment.captured", "payment.authorized"}:
+    if event.event_type in {
+        "payment.captured",
+        "payment.authorized",
+        "qr_code.credited",
+        "payment_link.paid",
+    }:
         # mark_paid is idempotent, so a webhook arriving after the client's own
         # confirmation is a no-op — and the worker is only told once.
+        #
+        # `qr_code.credited` is here rather than in a branch of its own because
+        # once the row is found, a QR credit *is* a capture: money arrived, the
+        # message was signature-verified, and everything downstream — the
+        # emergency broadcast, the worker's notification — must happen exactly
+        # as it does for a card.
         if payment.mark_paid(
-            razorpay_payment_id=entity.get("id", ""), signature="webhook"
+            razorpay_payment_id=entity.get("id", ""),
+            signature="webhook",
+            via=SettledVia.WEBHOOK,
         ):
             on_payment_settled(payment)
     elif event.event_type == "payment.failed":
@@ -646,12 +855,15 @@ def daily_rate_paise(engagement) -> int:
 
 __all__ = [
     "AlreadyPaid",
+    "AmountMismatch",
     "NothingToPay",
     "PaymentError",
     "SalaryBasis",
     "SignatureInvalid",
+    "UtrAlreadyUsed",
     "apply_webhook",
     "confirm_checkout",
+    "confirm_upi_settlement",
     "create_payment",
     "daily_rate_paise",
     "on_payment_settled",

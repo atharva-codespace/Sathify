@@ -55,6 +55,10 @@ BOOKING_FEE_CAP_PAISE = 4_000
 #:                         percentage on top of it would be a fee on a fee, and
 #:                         the household would see two platform lines on one
 #:                         charge with no way to tell them apart.
+#:   NOTICE_SETTLEMENT   — wages for days already worked (Module 4.6). Charging
+#:                         a platform fee on somebody's final pay packet, at the
+#:                         moment their arrangement is ending, is indefensible
+#:                         for the same reason a salary is exempt and then some.
 FEE_EXEMPT_KINDS = frozenset(
     {
         PaymentKind.ENGAGEMENT_SALARY,
@@ -62,6 +66,7 @@ FEE_EXEMPT_KINDS = frozenset(
         PaymentKind.REPLACEMENT,
         PaymentKind.REFUND,
         PaymentKind.EMERGENCY_SURCHARGE,
+        PaymentKind.NOTICE_SETTLEMENT,
     }
 )
 

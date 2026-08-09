@@ -187,7 +187,13 @@ def test_e2e_a_maid_on_leave_cannot_be_booked_over_the_visit_she_missed(
         society=society, engagement=engagement, worker=absent,
         leave_date=leave_date,
     )
-    category = ServiceCategory.objects.get(slug="emergency-assistance")
+    # An ordinary category, deliberately. This test is about leave and slot
+    # conflicts; it used the emergency one only because that skipped the notice
+    # window, and ``leave_date`` is a week out so any category clears it anyway.
+    # Emergency categories no longer accept a directed booking at all (Module
+    # 5.5 — they broadcast), so using one here would have the request refused
+    # for a reason that has nothing to do with what is being tested.
+    category = ServiceCategory.objects.get(slug="deep-cleaning")
 
     def book(start_time):
         return authenticated_client(resident_user).post(

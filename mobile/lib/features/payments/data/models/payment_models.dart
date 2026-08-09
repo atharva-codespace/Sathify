@@ -47,7 +47,14 @@ enum PaymentKind {
   booking('booking', 'One-day booking'),
   tip('tip', 'Tip'),
   refund('refund', 'Refund'),
-  replacement('replacement', 'Replacement cover');
+  replacement('replacement', 'Replacement cover'),
+
+  /// Module 5.5 — Sathify's fee for running an emergency broadcast. The only
+  /// kind owed to the platform rather than to a worker.
+  emergencySurcharge('emergency_surcharge', 'Emergency fee'),
+
+  /// Module 4.6 — this month's worked days, settled before notice takes effect.
+  noticeSettlement('notice_settlement', 'Final settlement');
 
   const PaymentKind(this.wireValue, this.label);
 
@@ -220,6 +227,109 @@ class SalaryBasis {
 /// [key] is the public key id — it identifies the merchant in the checkout
 /// sheet. The key secret never leaves the server, which is why the order was
 /// created there.
+/// One UPI app the payer might have. Presentational only — a signpost that
+/// their app is supported, never a branch. Every one of them scans the same
+/// hosted QR.
+class UpiApp {
+  const UpiApp({required this.key, required this.label});
+
+  final String key;
+  final String label;
+
+  factory UpiApp.fromJson(Map<String, dynamic> json) => UpiApp(
+        key: json['key'] as String? ?? '',
+        label: json['label'] as String? ?? '',
+      );
+}
+
+/// Module 8.9 — a Razorpay-hosted UPI QR for one payment.
+///
+/// -----------------------------------------------------------------------
+/// THE APP NO LONGER DRAWS THIS CODE, AND THAT IS THE POINT
+/// -----------------------------------------------------------------------
+/// It used to: the server built a `upi://pay` string against a plain VPA and
+/// the phone rendered it. Every UPI app scanned it — and the money landed in a
+/// bank account with no callback, so nothing could mark the payment paid except
+/// an administrator reading a statement.
+///
+/// Razorpay now hosts the code at [imageUrl] and watches it. The payer's
+/// experience is identical; ours is not, because a scan produces a signed
+/// `qr_code.credited` webhook and the payment settles by itself.
+///
+/// FamPay still works for the same reason it ever did — FamApp is a consumer
+/// UPI app with no merchant API, so the only way to pay from it was always to
+/// hand it something standard to scan. [apps] names it so a resident can see
+/// their app is supported; nothing here is per-app.
+class UpiQr {
+  const UpiQr({
+    required this.amountPaise,
+    this.kind = 'razorpay_qr',
+    this.imageUrl = '',
+    this.payload = '',
+    this.qrCodeId = '',
+    this.amountDisplay = '',
+    this.reference = '',
+    this.expiresAt,
+    this.apps = const [],
+  });
+
+  /// `razorpay_qr` — Razorpay hosts the image, and the payer scans straight
+  /// into their UPI app. `payment_link` — the fallback for accounts without the
+  /// QR Codes API: the app encodes [payload] and scanning opens Razorpay's
+  /// hosted page. Both settle through a signed webhook.
+  final String kind;
+
+  /// The URL to encode locally, on the `payment_link` path. Empty otherwise.
+  ///
+  /// It is a link rather than a payment instruction, which is why drawing it
+  /// here is safe in a way re-encoding a `upi://` string would not be — the
+  /// amount lives on Razorpay's side of it.
+  final String payload;
+
+  /// Where Razorpay serves the code. Loaded rather than encoded locally: the
+  /// string behind it is the gateway's now, and a code drawn here could drift
+  /// from the one Razorpay is actually watching.
+  final String imageUrl;
+
+  /// Razorpay's id for the code. Not shown; it is how a credit webhook finds
+  /// this payment again.
+  final String qrCodeId;
+
+  final int amountPaise;
+  final String amountDisplay;
+
+  /// The payment's own id, for a support conversation.
+  final String reference;
+
+  /// The code is single-use and closes itself, so it does not live long.
+  final DateTime? expiresAt;
+
+  final List<UpiApp> apps;
+
+  bool get hasExpired =>
+      expiresAt != null && DateTime.now().isAfter(expiresAt!);
+
+  /// Whether the app draws the code itself rather than loading a hosted one.
+  bool get isLocallyDrawn => imageUrl.isEmpty && payload.isNotEmpty;
+
+  /// Nothing to show at all — neither a hosted image nor something to encode.
+  bool get isEmpty => imageUrl.isEmpty && payload.isEmpty;
+
+  factory UpiQr.fromJson(Map<String, dynamic> json) => UpiQr(
+        kind: json['kind'] as String? ?? 'razorpay_qr',
+        imageUrl: json['image_url'] as String? ?? '',
+        payload: json['payload'] as String? ?? '',
+        qrCodeId: json['qr_code_id'] as String? ?? '',
+        amountPaise: json['amount_paise'] as int? ?? 0,
+        amountDisplay: json['amount_display'] as String? ?? '',
+        reference: json['reference'] as String? ?? '',
+        expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? ''),
+        apps: ((json['apps'] as List?) ?? const [])
+            .map((row) => UpiApp.fromJson(row as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 class CheckoutPayload {
   const CheckoutPayload({
     required this.key,
