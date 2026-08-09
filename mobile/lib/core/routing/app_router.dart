@@ -639,18 +639,21 @@ class _SplashScreen extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 76,
-              height: 76,
-              decoration: BoxDecoration(
-                color: AppColors.primary,
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                boxShadow: AppShadow.md,
-              ),
-              child: const Icon(
+            // The brand mark itself, not a stand-in glyph in a green tile.
+            // Sized and centred to match `drawable/launch_background.xml`, so
+            // the native launch screen hands over to this one without the logo
+            // jumping — on a cold start the two are on screen back to back.
+            Image.asset(
+              'assets/images/sathify_logo.png',
+              width: 96,
+              height: 96,
+              fit: BoxFit.contain,
+              // A missing asset must not take down the launch screen, which is
+              // the one screen with no way back.
+              errorBuilder: (_, __, ___) => const Icon(
                 Icons.verified_user_rounded,
-                size: 40,
-                color: AppColors.textOnPrimary,
+                size: 56,
+                color: AppColors.primary,
               ),
             ),
             const SizedBox(height: AppSpacing.md),

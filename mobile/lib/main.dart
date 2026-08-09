@@ -3,6 +3,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app.dart';
+import 'core/errors/error_boundary.dart';
 
 /// Application entry point.
 ///
@@ -10,6 +11,11 @@ import 'app.dart';
 /// uninitialised [AppConfig].
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Before anything can build: in a release build Flutter's default error
+  // widget is a blank grey box, so a crash inside build() shows the user an
+  // empty screen and tells nobody why. See installErrorBoundary().
+  installErrorBoundary();
 
   // `.env` is bundled as an asset (see pubspec.yaml). Tolerate its absence so a
   // fresh clone still runs before anyone has copied .env.example across.

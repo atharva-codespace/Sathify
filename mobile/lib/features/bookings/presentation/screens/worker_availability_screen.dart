@@ -6,12 +6,16 @@ import '../../../../shared/design_system.dart';
 import '../../data/models/booking_models.dart';
 import '../providers/booking_provider.dart';
 
-/// Module 5.3 — the worker marks which days they can take one-off jobs.
+/// Module 5.3 — the worker adjusts which days they can take one-off jobs.
 ///
-/// This screen is what makes Module 5 work at all: matching requires an
-/// explicit opt-in per date, so a worker who never comes here is never offered
-/// a one-day booking. The empty state says so plainly rather than looking like
-/// a bug.
+/// This screen used to be load-bearing in the worst way: matching required an
+/// explicit opt-in row per date, so a worker who never found this screen was
+/// never offered a one-day booking at all. That is no longer true — a worker
+/// who is approved and generally available is offered every date they have not
+/// blocked (see `bookings.services.candidate_workers`).
+///
+/// So this is now an *override* screen. Coming here is optional; what it buys
+/// is blocking out a date, or narrowing the hours on one.
 class WorkerAvailabilityScreen extends ConsumerWidget {
   const WorkerAvailabilityScreen({super.key});
 
@@ -72,9 +76,14 @@ class WorkerAvailabilityScreen extends ConsumerWidget {
           if (days.isEmpty) {
             return const AppEmptyState(
               icon: Icons.calendar_month_outlined,
-              title: 'No days marked yet',
-              message: 'Residents can only book you for one-day jobs on days '
-                  'you have marked here. Add the days you are free.',
+              title: 'Open to one-day jobs',
+              // Was "Residents can only book you on days you have marked
+              // here", which stopped being true when the opt-in requirement
+              // was lifted — and read as an instruction to do something that
+              // is no longer necessary.
+              message: 'Residents can book you for one-day jobs on any date. '
+                  'Add a day here only to block it out, or to say which hours '
+                  'you can work.',
             );
           }
 

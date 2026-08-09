@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The plate the adaptive icon's foreground sits on.
+
+  White rather than the brand green: the mark itself is green, and a green
+  logo on a green plate loses all of its contrast the moment the launcher
+  shrinks it to 48dp. Deliberately not overridden in values-night — the icon
+  should look the same on every home screen, and a dark plate would make the
+  darker half of the gradient disappear.
+-->
+<resources>
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+</resources>

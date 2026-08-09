@@ -160,6 +160,11 @@ class ApiEndpoints {
   /// 6.3 — pre-flight check before committing to a slot.
   static const String conflictCheck = '/scheduling/conflicts/check/';
 
+  /// 6.6 — the worker marks a day's work done. Takes exactly one of
+  /// `engagement` or `booking`; a booking-backed visit is also moved to
+  /// COMPLETED server-side, which is what opens payment for the household.
+  static const String markVisitComplete = '/scheduling/visits/complete/';
+
   /// 6.5 — urgent leave ("chutti"). GET lists what the caller can see; POST
   /// applies, and the server approves it in the same response.
   static const String leaveRequests = '/scheduling/leave/';

@@ -44,13 +44,37 @@ class _ApplyLeaveScreenState extends ConsumerState<ApplyLeaveScreen> {
     super.dispose();
   }
 
-  /// The engagement runs on particular weekdays, so only those are selectable —
-  /// there is nothing to take leave from on a day nobody expects you.
-  bool _isWorkingDay(DateTime day) {
-    final engagement = _engagement;
-    if (engagement == null) return false;
+  /// How far ahead leave may be taken. Mirrors ``MAX_LEAVE_LEAD_DAYS`` on the
+  /// server — this flow is for an emergency, and a month ahead is a
+  /// conversation about the engagement rather than an absence.
+  static const int _maxLeadDays = 14;
+
+  /// Which dates the picker offers.
+  ///
+  /// The engagement runs on particular weekdays, and the server refuses leave
+  /// for a day it does not run ("there is nothing to take leave from"), so
+  /// those days stay unselectable.
+  ///
+  /// -----------------------------------------------------------------------
+  /// IT FAILS OPEN, AND THAT IS THE FIX
+  /// -----------------------------------------------------------------------
+  /// This previously returned `false` whenever the engagement's working days
+  /// were not known — no engagement chosen yet, or a `days_of_week` that did
+  /// not arrive — which greys out **every** cell in the calendar. A picker
+  /// with nothing selectable is indistinguishable from a broken screen, and it
+  /// is the state this bug was reported as: the worker can see the dates but
+  /// cannot choose one.
+  ///
+  /// So an unknown answer now offers the date instead of hiding it. The server
+  /// still validates the choice, and its refusal names the actual reason,
+  /// which a silently disabled cell can never do. Failing open also keeps the
+  /// [showDatePicker] assertion on `initialDate` satisfiable — see
+  /// [_firstSelectableFrom].
+  bool _isSelectableDay(DateTime day) {
+    final days = _engagement?.terms.daysOfWeek ?? const <int>[];
+    if (days.isEmpty) return true;
     // Dart's weekday is 1..7 from Monday; the server's is 0..6 from Monday.
-    return engagement.terms.daysOfWeek.contains(day.weekday - 1);
+    return days.contains(day.weekday - 1);
   }
 
   Future<void> _pickDate() async {
@@ -62,12 +86,10 @@ class _ApplyLeaveScreenState extends ConsumerState<ApplyLeaveScreen> {
 
     final picked = await showDatePicker(
       context: context,
-      initialDate: _firstWorkingDayFrom(first),
+      initialDate: _firstSelectableFrom(first),
       firstDate: first,
-      // Mirrors MAX_LEAVE_LEAD_DAYS on the server. This flow is for an
-      // emergency; a month ahead is a conversation about the engagement.
-      lastDate: first.add(const Duration(days: 14)),
-      selectableDayPredicate: _isWorkingDay,
+      lastDate: first.add(const Duration(days: _maxLeadDays)),
+      selectableDayPredicate: _isSelectableDay,
       helpText: 'Which day cannot you come?',
     );
 
@@ -76,11 +98,16 @@ class _ApplyLeaveScreenState extends ConsumerState<ApplyLeaveScreen> {
     }
   }
 
-  DateTime _firstWorkingDayFrom(DateTime from) {
-    var day = from;
-    for (var i = 0; i < 15; i++) {
-      if (_isWorkingDay(day)) return day;
-      day = day.add(const Duration(days: 1));
+  /// The first offerable date at or after [from].
+  ///
+  /// `showDatePicker` asserts that `initialDate` satisfies the predicate and
+  /// throws otherwise, so this must never hand back a date the predicate
+  /// rejects. It cannot: [_isSelectableDay] fails open, so the loop always
+  /// finds a day within one week for any non-empty working-day set.
+  DateTime _firstSelectableFrom(DateTime from) {
+    for (var i = 0; i <= _maxLeadDays; i++) {
+      final day = from.add(Duration(days: i));
+      if (_isSelectableDay(day)) return day;
     }
     return from;
   }
@@ -204,6 +231,19 @@ class _ApplyLeaveScreenState extends ConsumerState<ApplyLeaveScreen> {
                     ],
                   ),
                 ),
+                // Says why some days in the calendar are greyed out. Without
+                // it a worker whose engagement runs twice a week opens the
+                // picker, finds most of the month untappable, and has no way
+                // to tell a rule from a fault.
+                if (_engagement != null &&
+                    _engagement!.terms.daysOfWeek.isNotEmpty) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    'You work ${_engagement!.terms.daysLabel}. Only those days '
+                    'can be taken off, up to $_maxLeadDays days ahead.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
                 const SizedBox(height: AppSpacing.lg),
 
                 Text('Reason (optional)',

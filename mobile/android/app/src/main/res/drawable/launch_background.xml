@@ -1,12 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
+<!--
+  The window background Android draws from the moment the icon is tapped until
+  Flutter renders its first frame. On a cold start against a sleeping free-tier
+  backend that gap is the most visible part of the launch, and it used to be a
+  blank white rectangle.
+
+  This is not the Dart splash screen in app_router.dart — that one cannot exist
+  yet at this point, because the engine has not started. The two are matched
+  deliberately: same mark, same white ground, so the handover between them is
+  invisible rather than a flash of one design replacing another.
+-->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@android:color/white" />
 
-    <!-- You can insert your own image assets here -->
-    <!-- <item>
+    <item>
         <bitmap
             android:gravity="center"
-            android:src="@mipmap/launch_image" />
-    </item> -->
+            android:src="@drawable/splash_logo" />
+    </item>
 </layer-list>

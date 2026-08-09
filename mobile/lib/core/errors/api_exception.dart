@@ -40,12 +40,52 @@ class ApiException implements Exception {
         statusCode: statusCode,
       );
     }
+
+    // ---------------------------------------------------------------------
+    // NOT THE ENVELOPE. NEVER SHOW THE BODY.
+    // ---------------------------------------------------------------------
+    // This used to be `message: json.toString()`, which put whatever the
+    // server sent straight onto the screen — and the bodies that land here
+    // are precisely the ones nobody wrote for a reader. An unhandled
+    // exception returns `None` from `sathify_exception_handler`, so Django's
+    // own 500 handling answers, and with DEBUG on that is a page of traceback.
+    // Dumping it into a `Text` widget shows a resident a Python stack trace
+    // and leaks server internals to anyone who can trigger a 500.
+    //
+    // A `detail` string is the one exception worth keeping: DRF writes it and
+    // it is meant to be read.
+    final detail = json['detail'];
     return ApiException(
       code: 'error',
-      message: json.toString(),
+      message: detail is String && detail.isNotEmpty
+          ? detail
+          : _friendlyFor(statusCode),
       statusCode: statusCode,
     );
   }
+
+  /// What to say when the server did not say anything usable.
+  ///
+  /// Split by status because the remedies genuinely differ: a 5xx is ours to
+  /// fix and retrying may work, while a 4xx that reached here is a request the
+  /// server rejected without explaining, and retrying it unchanged will not.
+  static String _friendlyFor(int? statusCode) {
+    if (statusCode != null && statusCode >= 500) {
+      return 'Something went wrong on our side. Please try again in a moment.';
+    }
+    return 'Something went wrong. Please try again.';
+  }
+
+  /// Builds an exception for a response whose body was not JSON at all.
+  ///
+  /// The body is deliberately not carried into [message]: an HTML error page
+  /// is the other shape a 500 arrives in, and it is no more readable than a
+  /// traceback.
+  ApiException.unreadableBody(int? statusCode)
+      : code = 'error',
+        message = _friendlyFor(statusCode),
+        details = const {},
+        statusCode = statusCode;
 
   /// Raised when the device itself has no network at all.
   ///

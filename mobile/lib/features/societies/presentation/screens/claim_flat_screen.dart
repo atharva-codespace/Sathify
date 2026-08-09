@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -26,17 +27,51 @@ class _ClaimFlatScreenState extends ConsumerState<ClaimFlatScreen> {
   bool _isSubmitting = false;
   String? _error;
 
+  /// Opens the gallery. Never lets the plugin's failure be silence.
+  ///
+  /// `pickImage` throws a `PlatformException` for the ordinary cases — gallery
+  /// permission refused, no picker on the device, the plugin failing to return
+  /// a file. Unguarded, every one of those made the button do *nothing*
+  /// visible, which is indistinguishable from a dead button and is how "can't
+  /// attach the proof image" was reported.
   Future<void> _pickProof() async {
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 80, // keeps uploads small on a metered connection
-    );
-    if (picked != null) setState(() => _proofDocument = picked);
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 80, // keeps uploads small on a metered connection
+      );
+      // A null result is the user backing out of the picker, not a failure.
+      if (picked == null || !mounted) return;
+      setState(() {
+        _proofDocument = picked;
+        _error = null;
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.code == 'photo_access_denied'
+            ? 'Sathify needs permission to open your photos. You can grant it '
+                'in your phone settings.'
+            : 'Could not open your photos. Please try again.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _error = 'Could not open your photos. Please try again.');
+    }
   }
 
   Future<void> _submit() async {
     if (_selectedFlat == null) {
       setState(() => _error = 'Choose your flat to continue.');
+      return;
+    }
+    // The administrator approves against the document; a claim submitted
+    // without one is a queue item they can only reject, so it is refused here
+    // rather than accepted and left to stall.
+    if (_proofDocument == null) {
+      setState(
+        () => _error = 'Attach your proof of residence to continue.',
+      );
       return;
     }
 
@@ -49,16 +84,27 @@ class _ClaimFlatScreenState extends ConsumerState<ClaimFlatScreen> {
       await ref.read(societyRepositoryProvider).claimFlat(
             flatId: _selectedFlat!.id,
             relationship: _relationship,
-            proofDocumentPath: _proofDocument?.path,
+            proofDocumentPath: _proofDocument!.path,
           );
       if (!mounted) return;
       ref.invalidate(myResidentProfileProvider);
       Navigator.of(context).pop(true);
     } on ApiException catch (error) {
-      setState(() {
-        _error = error.fieldError('flat') ?? error.message;
-        _isSubmitting = false;
-      });
+      if (!mounted) return;
+      setState(() => _error = error.fieldError('flat') ?? error.message);
+    } catch (error, stackTrace) {
+      // Anything that is not an ApiException: the file vanished between
+      // picking and uploading, a multipart encoding failure, a plugin throwing
+      // on a path it cannot read. These used to escape the handler entirely,
+      // which left the button spinning for ever with nothing said.
+      if (!mounted) return;
+      debugPrint('Flat claim failed: $error\n$stackTrace');
+      setState(
+        () => _error = 'Could not submit your claim. Please try again.',
+      );
+    } finally {
+      // On every branch, including the success path if the pop is skipped.
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
@@ -148,18 +194,31 @@ class _ClaimFlatScreenState extends ConsumerState<ClaimFlatScreen> {
             ),
             const SizedBox(height: 24),
             OutlinedButton.icon(
-              onPressed: _pickProof,
-              icon: const Icon(Icons.upload_file_outlined),
+              onPressed: _isSubmitting ? null : _pickProof,
+              icon: Icon(
+                _proofDocument == null
+                    ? Icons.upload_file_outlined
+                    : Icons.check_circle_outline,
+              ),
               label: Text(
                 _proofDocument == null
                     ? 'Attach proof of residence'
                     : 'Attached: ${_proofDocument!.name}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor:
+                    _proofDocument == null ? null : AppColors.success,
+                minimumSize: const Size.fromHeight(52),
               ),
             ),
             const SizedBox(height: 4),
             Text(
-              'Rent agreement, sale deed or a utility bill. Optional, but it '
-              'speeds up approval.',
+              // Was "Optional, but it speeds up approval" while the form also
+              // accepted an empty submission. It is required now, and the copy
+              // has to say so before the button does.
+              'Required: rent agreement, sale deed or a utility bill.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             if (_error != null) ...[

@@ -124,6 +124,37 @@ class ScheduleRepository {
     );
   }
 
+  // --- 6.6 Task completion ---------------------------------------------------
+
+  /// The worker says the day's work is finished (Module 6.6).
+  ///
+  /// Idempotent on the server: a double tap on a poor connection returns the
+  /// existing completion rather than moving the recorded time, so the
+  /// timestamp stays evidence of when the work actually ended.
+  ///
+  /// For a booking-backed visit the server also moves the booking itself to
+  /// COMPLETED, which is what opens payment — Module 8 refuses to bill for a
+  /// job that is not marked done.
+  Future<void> markVisitComplete({
+    required ScheduleSource source,
+    required int sourceId,
+    required DateTime visitDate,
+    String note = '',
+  }) async {
+    await _client.post(
+      ApiEndpoints.markVisitComplete,
+      data: {
+        // Exactly one of the two — the server rejects both or neither.
+        if (source == ScheduleSource.engagement)
+          'engagement': sourceId
+        else
+          'booking': sourceId,
+        'visit_date': formatWireDate(visitDate),
+        if (note.isNotEmpty) 'note': note,
+      },
+    );
+  }
+
   // --- 6.5 Urgent leave ("chutti") -------------------------------------------
 
   /// Leave the caller can see: a worker gets their own days off *and* the days

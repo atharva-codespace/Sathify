@@ -73,6 +73,10 @@ class _ResidentCardState extends ConsumerState<_ResidentCard> {
   bool _isBusy = false;
 
   Future<void> _decide({required bool approve}) async {
+    // Captured before the first await: the reason dialog is an async gap, and
+    // the invalidate further down removes this card from the list.
+    final messenger = ScaffoldMessenger.of(context);
+
     String? reason;
 
     if (!approve) {
@@ -94,7 +98,7 @@ class _ResidentCardState extends ConsumerState<_ResidentCard> {
           );
       if (!mounted) return;
       ref.invalidate(pendingResidentsProvider);
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text(
             approve
@@ -104,10 +108,18 @@ class _ResidentCardState extends ConsumerState<_ResidentCard> {
         ),
       );
     } on ApiException catch (error) {
-      if (!mounted) return;
-      setState(() => _isBusy = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.message)));
+      messenger.showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (error, stackTrace) {
+      debugPrint('Resident decision failed: $error\n$stackTrace');
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Could not save that. Please try again.')),
+      );
+    } finally {
+      // The same missing reset as the worker approval queue: only the error
+      // branch cleared it, so a successful decision left the card showing a
+      // spinner in place of its buttons for ever. See that screen for why
+      // invalidating the list does not stand in for this.
+      if (mounted) setState(() => _isBusy = false);
     }
   }
 

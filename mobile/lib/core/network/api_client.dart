@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../config/api_endpoints.dart';
 import '../config/app_config.dart';
@@ -327,14 +328,26 @@ class ApiClient {
         // cache fallbacks behave exactly as before.
         return const ApiException.unreachable();
       default:
+        final status = e.response?.statusCode;
         final data = e.response?.data;
         if (data is Map<String, dynamic>) {
-          return ApiException.fromJson(data, e.response?.statusCode);
+          return ApiException.fromJson(data, status);
+        }
+        if (status != null) {
+          // A body that is not JSON — overwhelmingly Django's HTML technical
+          // 500 page, which `sathify_exception_handler` deliberately does not
+          // intercept so the traceback still reaches the logs. It must reach
+          // the *logs* and not the screen: the raw page is printed for a
+          // developer here, and the user gets a sentence.
+          assert(() {
+            debugPrint('HTTP $status body (not shown to the user): $data');
+            return true;
+          }());
+          return ApiException.unreadableBody(status);
         }
         return ApiException(
           code: 'error',
           message: e.message ?? 'Unexpected network error.',
-          statusCode: e.response?.statusCode,
         );
     }
   }

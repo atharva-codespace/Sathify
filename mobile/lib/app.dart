@@ -9,6 +9,7 @@ import 'core/theme/app_theme.dart';
 import 'features/auth/presentation/providers/auth_provider.dart';
 import 'features/notifications/data/push_service.dart';
 import 'features/notifications/presentation/providers/notification_provider.dart';
+import 'features/notifications/presentation/widgets/notification_badge_refresher.dart';
 
 /// Root widget: theme, localisation, routing, and Module 10's push plumbing.
 class SathifyApp extends ConsumerStatefulWidget {
@@ -68,31 +69,36 @@ class _SathifyAppState extends ConsumerState<SathifyApp> {
       }
     });
 
-    return MaterialApp.router(
-      title: 'Sathify',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light,
-      darkTheme: AppTheme.dark,
-      // Light only, by design. The palette is built around a soft off-white
-      // ground with the brand green rationed to calls to action, and a dark
-      // inversion of that would need its own set of decisions rather than a
-      // mechanical flip. Pinning the mode also stops a device in dark mode from
-      // rendering a half-adapted screen.
-      themeMode: ThemeMode.light,
-      routerConfig: ref.watch(routerProvider),
+    // Wraps the whole app rather than sitting on one screen: the badge is in
+    // every role's app bar, and push is not guaranteed to be available at all
+    // (a build without google-services.json has none). See the widget.
+    return NotificationBadgeRefresher(
+      child: MaterialApp.router(
+        title: 'Sathify',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.light,
+        darkTheme: AppTheme.dark,
+        // Light only, by design. The palette is built around a soft off-white
+        // ground with the brand green rationed to calls to action, and a dark
+        // inversion of that would need its own set of decisions rather than a
+        // mechanical flip. Pinning the mode also stops a device in dark mode
+        // from rendering a half-adapted screen.
+        themeMode: ThemeMode.light,
+        routerConfig: ref.watch(routerProvider),
 
-      // Multilingual support is core MVP scope: many workers do not read
-      // English comfortably (see SRS 5.4).
-      supportedLocales: const [
-        Locale('en'),
-        Locale('hi'),
-        Locale('mr'),
-      ],
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
+        // Multilingual support is core MVP scope: many workers do not read
+        // English comfortably (see SRS 5.4).
+        supportedLocales: const [
+          Locale('en'),
+          Locale('hi'),
+          Locale('mr'),
+        ],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+      ),
     );
   }
 }

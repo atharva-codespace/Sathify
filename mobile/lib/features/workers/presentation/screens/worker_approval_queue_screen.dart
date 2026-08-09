@@ -78,6 +78,11 @@ class _WorkerCardState extends ConsumerState<_WorkerCard> {
   bool _isBusy = false;
 
   Future<void> _decide({required bool approve}) async {
+    // Captured before the first await: the reason dialog is an async gap, and
+    // the invalidate further down removes this card from the list, so its
+    // context can be gone by the time the response lands.
+    final messenger = ScaffoldMessenger.of(context);
+
     String reason = '';
 
     if (!approve) {
@@ -100,7 +105,7 @@ class _WorkerCardState extends ConsumerState<_WorkerCard> {
           );
       if (!mounted) return;
       ref.invalidate(pendingWorkersProvider);
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text(
             approve
@@ -110,10 +115,29 @@ class _WorkerCardState extends ConsumerState<_WorkerCard> {
         ),
       );
     } on ApiException catch (error) {
-      if (!mounted) return;
-      setState(() => _isBusy = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.message)));
+      messenger.showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (error, stackTrace) {
+      // Not just ApiException: anything thrown here previously escaped the
+      // handler and left the spinner up with no message at all.
+      debugPrint('Worker decision failed: $error\n$stackTrace');
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Could not save that. Please try again.')),
+      );
+    } finally {
+      // -----------------------------------------------------------------
+      // THE BUG THIS FIXES
+      // -----------------------------------------------------------------
+      // Only the *error* branch used to clear this, so a successful decision
+      // left `_isBusy` true for ever — and the build below swaps the whole
+      // action row for a CircularProgressIndicator while it is set. The
+      // rejection therefore showed its confirmation snackbar and then span
+      // permanently.
+      //
+      // Invalidating the list is not a substitute: Riverpod keeps serving the
+      // previous value while the refetch is in flight, so this very card stays
+      // mounted across the gap — and if the refetch fails, or the worker is
+      // still returned, it stays mounted for good.
+      if (mounted) setState(() => _isBusy = false);
     }
   }
 

@@ -315,11 +315,21 @@ class _DateHeader extends StatelessWidget {
   }
 }
 
-class _ScheduleCard extends ConsumerWidget {
+class _ScheduleCard extends ConsumerStatefulWidget {
   const _ScheduleCard({required this.item, required this.isWorker});
 
   final ScheduleItem item;
   final bool isWorker;
+
+  @override
+  ConsumerState<_ScheduleCard> createState() => _ScheduleCardState();
+}
+
+class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
+  bool _isBusy = false;
+
+  ScheduleItem get item => widget.item;
+  bool get isWorker => widget.isWorker;
 
   Future<void> _openTiming(BuildContext context, WidgetRef ref) async {
     final changed = await showModalBottomSheet<bool>(
@@ -334,8 +344,82 @@ class _ScheduleCard extends ConsumerWidget {
     }
   }
 
+  /// Module 6.6 — the worker says the day's work is done.
+  ///
+  /// The optional note is asked for in the same sheet rather than as a second
+  /// step: a worker finishing a job is on their way out of the door, and a
+  /// two-dialog flow is a flow that gets abandoned halfway.
+  Future<void> _markDone() async {
+    // Captured before the dialog opens: reading it afterwards would be a
+    // BuildContext use across an async gap, and this card can legitimately be
+    // disposed while the dialog is up (a pull-to-refresh rebuilds the list).
+    final messenger = ScaffoldMessenger.of(context);
+
+    final note = await showDialog<String>(
+      context: context,
+      builder: (_) => _NoteDialog(
+        title: 'Mark this work as done?',
+        hint: 'Optional — anything the household should know',
+        confirmLabel: 'Mark as done',
+        // Bookings are paid per job, so say so before she commits: this is the
+        // action that asks the household for money, and she should know that
+        // is what the button does.
+        footnote: item.isRecurring
+            ? 'The household will be told straight away.'
+            : 'The household will be asked to pay for this job.',
+      ),
+    );
+    if (note == null) return;
+
+    setState(() => _isBusy = true);
+
+    try {
+      await ref.read(scheduleRepositoryProvider).markVisitComplete(
+            source: item.source,
+            sourceId: item.sourceId,
+            visitDate: item.date,
+            note: note,
+          );
+      if (!mounted) return;
+      // The card is rebuilt from the server's own visit_status rather than
+      // flipped locally, so what the worker sees is what was actually recorded.
+      invalidateSchedule(ref);
+      showAppSnackBarOn(
+        messenger,
+        item.isRecurring
+            ? 'Marked done. The household has been told.'
+            : 'Marked done. The household has been asked to pay.',
+        tone: AppTone.success,
+      );
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
+    } finally {
+      // Always reset, on every branch. A spinner left spinning after a refused
+      // request is the bug this app has already been bitten by elsewhere.
+      if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  /// Whether this worker can still mark this visit done.
+  ///
+  /// Not offered to a resident (it is the worker's statement about her own
+  /// work), on a day she is away for, or on a visit still awaiting her answer.
+  /// Future days are excluded because the server refuses them anyway, and an
+  /// enabled button that always fails is worse than no button.
+  bool get _canMarkDone {
+    if (!isWorker || item.isComplete) return false;
+    if (item.onLeave && !item.isCover) return false;
+    if (item.needsResponse) return false;
+
+    final today = DateTime.now();
+    final visit = item.date;
+    final startOfTomorrow = DateTime(today.year, today.month, today.day + 1);
+    return visit.isBefore(startOfTomorrow);
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final counterparty = isWorker ? item.flatLabel : item.workerName;
 
@@ -436,6 +520,34 @@ class _ScheduleCard extends ConsumerWidget {
                     ),
                   ),
                 ],
+
+                // --- Module 6.6 -------------------------------------------
+                // Finished work reads as a fact on both sides' cards; the
+                // button underneath is the worker's only.
+                if (item.isComplete) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  const _Flag(
+                    icon: Icons.task_alt_rounded,
+                    label: 'Work marked done',
+                    colour: AppColors.success,
+                  ),
+                ] else if (item.isInProgress) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  const _Flag(
+                    icon: Icons.timelapse_rounded,
+                    label: 'In progress',
+                    colour: AppColors.info,
+                  ),
+                ],
+                if (_canMarkDone) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  AppButton.secondary(
+                    label: 'Mark as done',
+                    icon: Icons.task_alt_rounded,
+                    isLoading: _isBusy,
+                    onPressed: _markDone,
+                  ),
+                ],
               ],
             ),
           ),
@@ -447,6 +559,69 @@ class _ScheduleCard extends ConsumerWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// Confirms a completion, and collects the optional note in the same step.
+class _NoteDialog extends StatefulWidget {
+  const _NoteDialog({
+    required this.title,
+    required this.hint,
+    required this.confirmLabel,
+    this.footnote = '',
+  });
+
+  final String title;
+  final String hint;
+  final String confirmLabel;
+  final String footnote;
+
+  @override
+  State<_NoteDialog> createState() => _NoteDialogState();
+}
+
+class _NoteDialogState extends State<_NoteDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _controller,
+            autofocus: true,
+            maxLines: 3,
+            maxLength: 300,
+            decoration: InputDecoration(hintText: widget.hint),
+          ),
+          if (widget.footnote.isNotEmpty)
+            Text(
+              widget.footnote,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Not yet'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: Text(widget.confirmLabel),
+        ),
+      ],
     );
   }
 }

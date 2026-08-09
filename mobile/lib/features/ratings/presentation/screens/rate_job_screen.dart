@@ -24,9 +24,14 @@ class RateJobScreen extends ConsumerWidget {
       body: pending.when(
         loading: () => const AppSkeletonList(),
         error: (error, _) => AppErrorState(
+          // A non-API failure — a parse error, a null where the server
+          // promised a value — used to collapse into "Could not load your
+          // jobs", which names no cause and leaves nothing to report. The
+          // text is what makes the difference between a bug someone can chase
+          // and a screen that is simply broken.
           message: error is ApiException
               ? error.message
-              : 'Could not load your jobs.',
+              : 'Could not load your jobs.\n$error',
           onRetry: () => ref.invalidate(pendingRatingsProvider),
         ),
         data: (jobs) {
@@ -36,6 +41,10 @@ class RateJobScreen extends ConsumerWidget {
           return RefreshIndicator(
             onRefresh: () async => ref.invalidate(pendingRatingsProvider),
             child: ListView.builder(
+              // Without this a short list is not scrollable, so the
+              // RefreshIndicator wrapping it can never be pulled — every other
+              // list in the app sets it for exactly that reason.
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.symmetric(vertical: 8),
               itemCount: jobs.length,
               itemBuilder: (context, index) => _JobCard(job: jobs[index]),

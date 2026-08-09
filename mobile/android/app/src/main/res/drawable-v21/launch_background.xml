@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="?android:colorBackground" />
+<!--
+  As drawable/launch_background.xml, for API 21+.
 
-    <!-- You can insert your own image assets here -->
-    <!-- <item>
+  The ground is pinned to white rather than `?android:colorBackground`, which
+  the default resolves to. That attribute follows the system theme, so on a
+  phone in dark mode it turns near-black — and the darker half of this logo's
+  gradient vanishes into it. The app itself is light-only by design (see
+  app.dart), so a white launch ground is also the honest preview of what opens.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+
+    <item>
         <bitmap
             android:gravity="center"
-            android:src="@mipmap/launch_image" />
-    </item> -->
+            android:src="@drawable/splash_logo" />
+    </item>
 </layer-list>

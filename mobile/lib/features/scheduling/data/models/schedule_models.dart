@@ -63,6 +63,9 @@ class ScheduleItem {
     this.coverWorkerName = '',
     this.isCover = false,
     this.coveringForName = '',
+    this.visitStatus = 'pending',
+    this.completedAt,
+    this.completionNote = '',
   });
 
   final ScheduleSource source;
@@ -110,6 +113,21 @@ class ScheduleItem {
   /// agreed to take for one day.
   final bool isCover;
   final String coveringForName;
+
+  // --- 6.6 how far through the day's work this visit is ----------------------
+
+  /// `pending`, `in_progress` or `complete`, composed server-side from the gate
+  /// log and the completion mark. Never derived locally — the gate is the
+  /// authority on arrival and a second opinion here would disagree with it.
+  final String visitStatus;
+  final DateTime? completedAt;
+  final String completionNote;
+
+  /// The worker has marked the day's work done.
+  bool get isComplete => visitStatus == 'complete' || completedAt != null;
+
+  /// Somebody has arrived but not yet finished.
+  bool get isInProgress => visitStatus == 'in_progress';
 
   /// Nobody is coming: leave was taken and no cover was arranged.
   bool get isUncovered => onLeave && coverWorkerName.isEmpty;
@@ -167,6 +185,9 @@ class ScheduleItem {
         coverWorkerName: json['cover_worker_name'] as String? ?? '',
         isCover: json['is_cover'] as bool? ?? false,
         coveringForName: json['covering_for_name'] as String? ?? '',
+        visitStatus: json['visit_status'] as String? ?? 'pending',
+        completedAt: DateTime.tryParse(json['completed_at'] as String? ?? ''),
+        completionNote: json['completion_note'] as String? ?? '',
       );
 }
 
