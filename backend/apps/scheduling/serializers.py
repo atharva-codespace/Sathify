@@ -65,6 +65,14 @@ class ScheduleItemSerializer(serializers.Serializer):
     completion_note = serializers.CharField(read_only=True)
     completion_photo_url = serializers.CharField(read_only=True)
 
+    #: The server's own answer to "may this worker mark this visit done now".
+    #: The client renders the button from this and nothing else — see the field
+    #: comment on ``ScheduleItem.can_mark_done`` for what happened when it did
+    #: not.
+    can_mark_done = serializers.BooleanField(read_only=True)
+    #: ``app`` or ``cash``. Emergencies are settled hand to hand.
+    settlement = serializers.CharField(read_only=True)
+
     # --- 6.7 what the day is worth, and when the next one is ----------------
     pay_paise = serializers.IntegerField(read_only=True)
     pay_state = serializers.CharField(read_only=True)

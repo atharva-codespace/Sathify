@@ -219,12 +219,46 @@ class DayAvailability(TimeStampedModel):
 
 
 class BookingStatus(models.TextChoices):
+    """Where a booking has got to.
+
+    Two lifecycles share this enum, because they share a row:
+
+    * **Directed** (the ordinary path) — a resident picks one worker, so the
+      booking opens at ``PENDING`` and that one worker answers it.
+    * **Broadcast** (the emergency path, Module 5.5) — nobody is picked. The
+      booking opens at ``PAYMENT_PENDING``, moves to ``BROADCAST`` once the
+      surcharge is settled, and reaches ``CONFIRMED`` when the first worker to
+      accept claims it. ``UNFULFILLED`` is where it lands if none of them does.
+
+    They converge at ``CONFIRMED``: from that point a booking behaves
+    identically whichever way it was created, which is the whole reason this is
+    one model and one enum rather than two parallel ones.
+    """
+
+    #: Emergency only. The surcharge has not settled, so nobody has been told
+    #: about this job yet — see ``bookings/emergency.py``.
+    PAYMENT_PENDING = "payment_pending", _("Awaiting the emergency surcharge")
+    #: Emergency only. Offered to several workers at once; unclaimed so far.
+    BROADCAST = "broadcast", _("Offered to available workers")
+
     PENDING = "pending", _("Awaiting the worker's confirmation")
     CONFIRMED = "confirmed", _("Confirmed")
     COMPLETED = "completed", _("Completed")
     DECLINED = "declined", _("Declined by the worker")
     CANCELLED = "cancelled", _("Cancelled")
     EXPIRED = "expired", _("Not confirmed before the start time")
+    #: Emergency only. Broadcast, and nobody accepted before the deadline.
+    UNFULFILLED = "unfulfilled", _("Nobody accepted in time")
+
+
+#: Statuses in which an emergency booking is still looking for somebody.
+#:
+#: Named because three different places have to agree on it — the sweep, the
+#: resident's live view, and the cancellation path — and a list repeated three
+#: times is a list that eventually disagrees with itself.
+EMERGENCY_OPEN_STATUSES = frozenset(
+    {BookingStatus.PAYMENT_PENDING, BookingStatus.BROADCAST}
+)
 
 
 class CancelledBy(models.TextChoices):
@@ -263,9 +297,23 @@ class BookingQuerySet(models.QuerySet):
         Same lazy-expiry approach as Module 4's hire requests: there is no
         scheduled worker on the free tier, so rows are swept on read. Idempotent
         and safe to call on every request.
+
+        Deliberately keyed on ``status=PENDING`` only. A broadcast emergency has
+        no single worker who could have confirmed it, so "not confirmed before
+        the start time" is not a thing that can happen to one — it expires on
+        its own offer deadline instead, through
+        :func:`apps.bookings.emergency.expire_unclaimed`.
         """
         return self.stale().update(
             status=BookingStatus.EXPIRED, updated_at=timezone.now()
+        )
+
+    def unclaimed(self):
+        """Broadcast emergencies whose offer window has closed."""
+        return self.filter(
+            status=BookingStatus.BROADCAST,
+            offer_expires_at__isnull=False,
+            offer_expires_at__lte=timezone.now(),
         )
 
 
@@ -275,8 +323,20 @@ class Booking(SocietyScopedModel, TimeStampedModel):
     resident = models.ForeignKey(
         "societies.Resident", on_delete=models.PROTECT, related_name="bookings"
     )
+    #: Null only while an emergency booking is still looking for somebody.
+    #:
+    #: Every other status implies a worker, and every existing consumer reads
+    #: bookings that are PENDING or later, so nothing outside the emergency
+    #: module ever sees this null. That is the property that made nullable
+    #: cheaper than a parallel "EmergencyRequest" model: a job that has found
+    #: its worker is an ordinary booking, and payments, ratings, attendance and
+    #: the schedule all keep working on it without knowing how it was created.
     worker = models.ForeignKey(
-        "workers.WorkerProfile", on_delete=models.PROTECT, related_name="bookings"
+        "workers.WorkerProfile",
+        on_delete=models.PROTECT,
+        related_name="bookings",
+        null=True,
+        blank=True,
     )
     category = models.ForeignKey(
         ServiceCategory, on_delete=models.PROTECT, related_name="bookings"
@@ -303,6 +363,33 @@ class Booking(SocietyScopedModel, TimeStampedModel):
     declined_at = models.DateTimeField(null=True, blank=True)
     response_note = models.TextField(blank=True, max_length=500)
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    # --- 5.5 emergency broadcast -------------------------------------------
+    #
+    # Frozen at creation, like ``cancellation_fee`` and for the same reason: the
+    # surcharge table may be re-priced later, and what a household was actually
+    # charged must not change retrospectively when it is.
+    emergency_surcharge_paise = models.PositiveIntegerField(
+        default=0,
+        help_text=_(
+            "Module 5.5 — the platform's emergency fee, in paise, fixed when "
+            "the request was raised. Zero on every ordinary booking."
+        ),
+    )
+    broadcast_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_("When the request was released to workers."),
+    )
+    offer_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=_(
+            "When an unclaimed broadcast gives up. Indexed because the sweep "
+            "that closes lapsed requests runs on ordinary read paths."
+        ),
+    )
 
     # --- 5.4 cancellation ---------------------------------------------------
     cancelled_at = models.DateTimeField(null=True, blank=True)
@@ -344,6 +431,47 @@ class Booking(SocietyScopedModel, TimeStampedModel):
     def __str__(self):
         return f"{self.category} for {self.resident} on {self.scheduled_date}"
 
+    # --- Emergency (Module 5.5) --------------------------------------------
+
+    @property
+    def is_emergency(self) -> bool:
+        """Whether this booking went through the broadcast flow.
+
+        Read off the category's existing ``bypasses_notice_period`` flag rather
+        than stored a second time. That flag already *means* "this is an
+        emergency category" — its own help text says so — and a second boolean
+        that must always equal the first is a second boolean that eventually
+        does not.
+        """
+        return bool(self.category_id and self.category.bypasses_notice_period)
+
+    @property
+    def is_awaiting_surcharge(self) -> bool:
+        return self.status == BookingStatus.PAYMENT_PENDING
+
+    @property
+    def is_broadcast(self) -> bool:
+        """Out with the workers, unclaimed."""
+        return self.status == BookingStatus.BROADCAST
+
+    @property
+    def is_seeking_worker(self) -> bool:
+        """Raised, but nobody is coming yet — for either emergency reason."""
+        return self.status in EMERGENCY_OPEN_STATUSES
+
+    @property
+    def offer_window_closed(self) -> bool:
+        if self.offer_expires_at is None:
+            return False
+        return timezone.now() >= self.offer_expires_at
+
+    @property
+    def seconds_left_to_claim(self) -> int:
+        """How long a worker still has to accept. Zero once the window shuts."""
+        if self.offer_expires_at is None:
+            return 0
+        return max(0, int((self.offer_expires_at - timezone.now()).total_seconds()))
+
     # --- Derived time ------------------------------------------------------
 
     @property
@@ -373,7 +501,13 @@ class Booking(SocietyScopedModel, TimeStampedModel):
 
     @property
     def is_live(self) -> bool:
-        """Occupies the worker's day: pending or confirmed."""
+        """Occupies a worker's day: pending or confirmed.
+
+        A broadcast emergency is deliberately **not** live. It occupies nobody's
+        day precisely because nobody has taken it, and counting it as a
+        commitment would block every worker it was offered to from being
+        matched to anything else.
+        """
         return self.status in {BookingStatus.PENDING, BookingStatus.CONFIRMED}
 
     @property
@@ -387,15 +521,152 @@ class Booking(SocietyScopedModel, TimeStampedModel):
 
     @property
     def effective_status(self) -> str:
-        """Status as the user should see it, accounting for un-swept expiry."""
-        return BookingStatus.EXPIRED if self.is_stale else self.status
+        """Status as the user should see it, accounting for un-swept sweeps.
+
+        Both lazy expiries are reflected here, so a row that is over in fact but
+        has not been written yet never reads as still open to the person
+        looking at it.
+        """
+        if self.is_stale:
+            return BookingStatus.EXPIRED
+        if self.is_broadcast and self.offer_window_closed:
+            return BookingStatus.UNFULFILLED
+        return self.status
 
     @property
     def is_actionable(self) -> bool:
-        """Whether the worker may still confirm or decline."""
+        """Whether the worker may still confirm or decline.
+
+        Broadcast bookings are answered through the offer endpoints instead —
+        there is no single worker for this to be asking about.
+        """
         return self.status == BookingStatus.PENDING and not self.has_started
 
     @property
+    def can_be_completed(self) -> bool:
+        """Whether "mark as done" would be accepted right now.
+
+        -------------------------------------------------------------------
+        WHY THIS IS A DATE COMPARISON AND NOT ``has_started``
+        -------------------------------------------------------------------
+        It used to be ``has_started`` — the job may only be closed out once the
+        clock has passed its start time. That reads as obviously right and is
+        the reason "Mark as done" failed on emergency bookings.
+
+        An emergency is booked minutes before it is served, so the gap between
+        "she is standing in the flat, finished" and "the start time on the row"
+        is routinely on the wrong side of zero: the resident raises it at 14:20
+        for 14:30, the worker arrives at 14:22 because that is what an emergency
+        *is*, finishes at 14:28, taps the button, and the server tells her the
+        job has not started yet. She cannot fix that, and the household cannot
+        pay for work that will not close.
+
+        A worker saying she has finished is the authority on whether she has
+        finished. The only thing worth guarding against is closing out a job on
+        a day that has not arrived, which is what the date comparison does — a
+        booking for next Tuesday is still refused, on Monday and on every day
+        before it.
+        """
+        return (
+            self.status == BookingStatus.CONFIRMED
+            and self.scheduled_date <= timezone.localdate()
+        )
+
+    @property
     def can_be_cancelled(self) -> bool:
-        """Cancellable right up to the start time — with a fee near it."""
+        """Cancellable right up to the start time — with a fee near it.
+
+        An emergency still hunting for a worker is cancellable too, and always
+        free: there is no worker yet who could have turned other work away, so
+        there is nobody for a fee to compensate.
+        """
+        if self.is_seeking_worker:
+            return True
         return self.is_live and not self.has_started
+
+
+class OfferState(models.TextChoices):
+    OFFERED = "offered", _("Waiting for an answer")
+    ACCEPTED = "accepted", _("Accepted — this worker got the job")
+    DECLINED = "declined", _("Declined")
+    #: Somebody else got there first. Distinct from DECLINED on purpose: a
+    #: worker who was beaten to a job did not turn it down, and Module 9's trust
+    #: scoring must never be able to read the two as the same thing.
+    LOST = "lost", _("Another worker accepted first")
+    EXPIRED = "expired", _("The request lapsed unanswered")
+
+
+class BookingOfferQuerySet(models.QuerySet):
+    def open(self):
+        return self.filter(state=OfferState.OFFERED)
+
+
+class BookingOffer(TimeStampedModel):
+    """Module 5.5 — one emergency request, as put to one worker.
+
+    -------------------------------------------------------------------------
+    WHY THE OFFER IS A ROW AND NOT JUST A NOTIFICATION
+    -------------------------------------------------------------------------
+    A broadcast could have been implemented as "notify everyone who matches and
+    let whoever answers first hit the accept endpoint". That would work right up
+    to the first question anybody asks about it: who was this actually offered
+    to, did she ever see it, and why did the request lapse when six workers were
+    free? A notification is a delivery attempt, not a record of who was asked.
+
+    So the offer is stored. It also gives the maid's dashboard something cheap
+    to query — one indexed lookup on ``(worker, state)`` — rather than
+    re-running the matcher on every poll, which is what a five-second refresh
+    interval makes unaffordable.
+
+    The row is **not** the arbiter of who won. That is decided by a conditional
+    UPDATE on the booking itself; see ``emergency.accept_offer``. Offers are
+    reconciled to match the outcome afterwards.
+    """
+
+    booking = models.ForeignKey(
+        Booking, on_delete=models.CASCADE, related_name="offers"
+    )
+    worker = models.ForeignKey(
+        "workers.WorkerProfile", on_delete=models.CASCADE, related_name="booking_offers"
+    )
+
+    state = models.CharField(
+        max_length=20, choices=OfferState.choices, default=OfferState.OFFERED,
+        db_index=True,
+    )
+    #: Where this worker ranked when the request went out (0 is the best match).
+    #: Kept for the unmet-demand picture: "we asked eight people and the best
+    #: three never answered" is a different problem from "we could only find
+    #: one".
+    rank = models.PositiveSmallIntegerField(default=0)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    objects = BookingOfferQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["rank", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["booking", "worker"], name="one_offer_per_worker_per_booking"
+            ),
+            # At most one accepted offer per booking. The conditional UPDATE in
+            # ``emergency.accept_offer`` is what prevents a second winner; this
+            # is the database saying so as well, so a future code path cannot
+            # quietly reintroduce the race this feature was rebuilt to remove.
+            models.UniqueConstraint(
+                fields=["booking"],
+                condition=models.Q(state=OfferState.ACCEPTED),
+                name="one_accepted_offer_per_booking",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["worker", "state"]),
+            models.Index(fields=["booking", "state"]),
+        ]
+
+    def __str__(self):
+        return f"{self.booking_id} → {self.worker_id} ({self.state})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.state == OfferState.OFFERED

@@ -40,6 +40,49 @@ final bookingsProvider = FutureProvider.autoDispose<List<Booking>>(
   (ref) => ref.read(bookingRepositoryProvider).fetchBookings(),
 );
 
+// --- Module 5.5: emergency broadcast ----------------------------------------
+
+/// The live emergency picture for whoever is signed in.
+///
+/// -----------------------------------------------------------------------
+/// WHY THIS IS POLLED AND NOT PUSHED
+/// -----------------------------------------------------------------------
+/// A claimed job has to vanish from seven other dashboards within seconds, and
+/// the household has to see who is coming without reopening anything. The
+/// obvious mechanism is a socket, and this deployment cannot have one: the
+/// backend is a single free Render web service with no Channels, no Redis and
+/// no second process to run them in (`docs/free-tier-constraints.md` §7).
+///
+/// So the server exposes one very small endpoint and this polls it — but only
+/// while something is actually happening. [EmergencyLiveRefresher] starts a
+/// timer when there is live work and stops the moment there is not, so the cost
+/// is bounded to the few minutes an emergency is in flight rather than being a
+/// permanent background drip.
+final emergencyLiveProvider = FutureProvider<EmergencyLiveState>(
+  (ref) => ref.read(bookingRepositoryProvider).fetchEmergencyLive(),
+);
+
+/// Just the worker's open offers, for the cards at the top of her dashboard.
+final myEmergencyOffersProvider = Provider<List<EmergencyOffer>>((ref) {
+  return ref.watch(emergencyLiveProvider).maybeWhen(
+        data: (state) => state.offers,
+        orElse: () => const <EmergencyOffer>[],
+      );
+});
+
+/// The resident's own open and just-claimed emergency requests.
+final myEmergencyRequestsProvider = Provider<List<Booking>>((ref) {
+  return ref.watch(emergencyLiveProvider).maybeWhen(
+        data: (state) => state.requests,
+        orElse: () => const <Booking>[],
+      );
+});
+
+/// Module 5.5 — what raising an emergency today would cost.
+final surchargeQuoteProvider = FutureProvider.autoDispose<SurchargeQuote>(
+  (ref) => ref.read(bookingRepositoryProvider).fetchSurchargeQuote(),
+);
+
 /// Refreshes everything a booking action could have changed.
 ///
 /// Availability is invalidated alongside the bookings themselves: confirming or
@@ -49,4 +92,5 @@ final bookingsProvider = FutureProvider.autoDispose<List<Booking>>(
 void invalidateBookings(WidgetRef ref) {
   ref.invalidate(bookingsProvider);
   ref.invalidate(myAvailabilityProvider);
+  ref.invalidate(emergencyLiveProvider);
 }

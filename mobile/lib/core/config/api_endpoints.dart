@@ -147,6 +147,30 @@ class ApiEndpoints {
   static String completeBooking(int bookingId) =>
       '/bookings/$bookingId/complete/';
 
+  // --- Module 5.5: Emergency broadcast ---------------------------------------
+  /// What the emergency fee would be. Shown before the resident commits, so a
+  /// charge is never discovered after the fact.
+  static const String emergencyQuote = '/bookings/emergency/quote/';
+
+  /// Raises a request and opens the surcharge that unlocks it. Nothing reaches
+  /// a worker until that payment settles.
+  static const String raiseEmergency = '/bookings/emergency/';
+
+  /// The poll both dashboards live on while a request is in flight. Small on
+  /// purpose — see `EmergencyLiveView` on the server for why this, and not a
+  /// socket, is what "real time" means on this deployment.
+  static const String emergencyLive = '/bookings/emergency/live/';
+
+  /// Requests currently offered to the signed-in worker.
+  static const String emergencyOffers = '/bookings/emergency/offers/';
+
+  /// Claim a request. First one through wins; everyone else gets a 409.
+  static String acceptEmergency(int bookingId) =>
+      '/bookings/emergency/$bookingId/accept/';
+
+  static String declineEmergency(int bookingId) =>
+      '/bookings/emergency/$bookingId/decline/';
+
   // --- Module 6: Scheduling & Task Management --------------------------------
   /// 6.1 — the caller's own day, engagements and bookings merged.
   static const String myToday = '/scheduling/me/today/';

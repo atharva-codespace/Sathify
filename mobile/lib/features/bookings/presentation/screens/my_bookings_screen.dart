@@ -139,7 +139,13 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
         () => ref
             .read(bookingRepositoryProvider)
             .completeBooking(widget.booking.id),
-        'Marked complete.',
+        widget.booking.isCashSettled
+            // Says what happens next rather than only what just happened. On a
+            // cash job nothing further arrives in the app, so a bare "Marked
+            // complete" would leave a worker waiting for a transfer that is
+            // never coming.
+            ? 'Marked complete. ₹${widget.booking.quotedPrice} is payable in cash.'
+            : 'Marked complete.',
       );
 
   /// Opens (or resumes) the payment for a completed job, then hands off to
@@ -221,10 +227,13 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
       case BookingStatus.completed:
         return AppTone.info;
       case BookingStatus.pending:
+      case BookingStatus.paymentPending:
+      case BookingStatus.broadcast:
         return AppTone.warning;
       case BookingStatus.declined:
       case BookingStatus.cancelled:
       case BookingStatus.expired:
+      case BookingStatus.unfulfilled:
         return AppTone.danger;
     }
   }
@@ -291,8 +300,19 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
           ),
           _DetailRow(
             icon: Icons.currency_rupee,
-            text: '${booking.quotedPrice}',
+            // The settlement route travels with the amount, always. A figure
+            // with no indication of how it is paid is the ambiguity that gets
+            // somebody paid twice or not at all.
+            text: booking.isCashSettled
+                ? '${booking.quotedPrice} · paid in cash'
+                : '${booking.quotedPrice}',
           ),
+          if (booking.isEmergency && booking.emergencySurchargePaise > 0)
+            _DetailRow(
+              icon: Icons.bolt_rounded,
+              text: 'Emergency fee ₹${booking.emergencySurchargePaise ~/ 100} '
+                  '(Sathify)',
+            ),
           if (widget.isWorker && booking.residentFlat.isNotEmpty)
             _DetailRow(icon: Icons.home_outlined, text: booking.residentFlat),
           if (!widget.isWorker && booking.workerPhone.isNotEmpty)
@@ -363,6 +383,22 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
           ],
         ),
       );
+    } else if (booking.canMarkDone) {
+      // Ordered *above* cancelling, and keyed on the server's own answer.
+      //
+      // This branch used to sit last and read `booking.isConfirmed`, behind an
+      // `else if (booking.canBeCancelled)` that matched every confirmed booking
+      // whose start time had not passed. So a job that could legitimately be
+      // closed out — which now includes a same-day emergency finished a few
+      // minutes early — showed "Cancel booking" and no way to finish it at all.
+      buttons.add(
+        AppButton.secondary(
+          label: booking.isCashSettled ? 'Work done — collect cash' : 'Mark complete',
+          icon: Icons.task_alt_rounded,
+          isLoading: _isBusy,
+          onPressed: _complete,
+        ),
+      );
     } else if (booking.canBeCancelled) {
       buttons.add(
         AppButton.secondary(
@@ -370,17 +406,6 @@ class _BookingCardState extends ConsumerState<_BookingCard> {
           icon: Icons.cancel_outlined,
           isLoading: _isBusy,
           onPressed: _cancel,
-        ),
-      );
-    } else if (booking.isConfirmed) {
-      // Confirmed and already under way: the remaining action is to close it
-      // out. Module 7 will do this from gate attendance instead.
-      buttons.add(
-        AppButton.secondary(
-          label: 'Mark complete',
-          icon: Icons.task_alt_rounded,
-          isLoading: _isBusy,
-          onPressed: _complete,
         ),
       );
     } else if (!widget.isWorker && booking.needsPayment) {

@@ -21,6 +21,35 @@ urlpatterns = [
     ),
     path("match/", views.BookingMatchView.as_view(), name="match"),
 
+    # --- 5.5 Emergency broadcast --------------------------------------------
+    # Also declared before "<int:pk>/", for the same reason.
+    path(
+        "emergency/quote/",
+        views.EmergencySurchargeQuoteView.as_view(),
+        name="emergency-quote",
+    ),
+    path("emergency/", views.RaiseEmergencyView.as_view(), name="emergency-raise"),
+    path(
+        "emergency/live/",
+        views.EmergencyLiveView.as_view(),
+        name="emergency-live",
+    ),
+    path(
+        "emergency/offers/",
+        views.MyEmergencyOffersView.as_view(),
+        name="emergency-offers",
+    ),
+    path(
+        "emergency/<int:pk>/accept/",
+        views.AcceptEmergencyView.as_view(),
+        name="emergency-accept",
+    ),
+    path(
+        "emergency/<int:pk>/decline/",
+        views.DeclineEmergencyView.as_view(),
+        name="emergency-decline",
+    ),
+
     # --- 5.2 Bookings -------------------------------------------------------
     path("", views.BookingListCreateView.as_view(), name="booking-list"),
     path("<int:pk>/", views.BookingDetailView.as_view(), name="booking-detail"),

@@ -7,6 +7,8 @@ import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
+import '../../../bookings/presentation/widgets/emergency_offer_card.dart';
+import '../../../bookings/presentation/widgets/emergency_request_strip.dart';
 import '../../../notifications/presentation/widgets/notification_bell.dart';
 import '../../data/models/schedule_models.dart';
 import '../providers/schedule_provider.dart';
@@ -197,7 +199,31 @@ class _TodayTab extends ConsumerWidget {
           onRetry: () => ref.invalidate(todayScheduleProvider),
         ),
         data: (items) {
-          if (items.isEmpty) return _emptyDay(isWorker);
+          // Module 5.5 — incoming emergency work sits above the day, for both
+          // sides: a worker sees requests she can claim, a household sees the
+          // one it just raised and who picked it up. It renders nothing when
+          // there is nothing in flight, so an ordinary day looks exactly as it
+          // did before.
+          final banner = isWorker
+              ? const EmergencyOfferStrip()
+              : const EmergencyRequestStrip();
+
+          if (items.isEmpty) {
+            return RefreshIndicator(
+              onRefresh: () async => ref.invalidate(todayScheduleProvider),
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.gutter,
+                  AppSpacing.sm,
+                  AppSpacing.gutter,
+                  AppSpacing.xxl,
+                ),
+                children: [banner, _emptyDay(isWorker)],
+              ),
+            );
+          }
+
           return RefreshIndicator(
             onRefresh: () async => ref.invalidate(todayScheduleProvider),
             child: ListView.builder(
@@ -208,11 +234,17 @@ class _TodayTab extends ConsumerWidget {
                 AppSpacing.gutter,
                 AppSpacing.xxl,
               ),
-              itemCount: items.length,
-              itemBuilder: (context, index) => AppFadeIn(
-                index: index,
-                child: _ScheduleCard(item: items[index], isWorker: isWorker),
-              ),
+              itemCount: items.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) return banner;
+                return AppFadeIn(
+                  index: index - 1,
+                  child: _ScheduleCard(
+                    item: items[index - 1],
+                    isWorker: isWorker,
+                  ),
+                );
+              },
             ),
           );
         },
@@ -361,12 +393,18 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
         title: 'Mark this work as done?',
         hint: 'Optional — anything the household should know',
         confirmLabel: 'Mark as done',
-        // Bookings are paid per job, so say so before she commits: this is the
-        // action that asks the household for money, and she should know that
-        // is what the button does.
+        // Say what the button actually does before she taps it, and say it
+        // differently for the three cases, because they are different: a
+        // recurring visit moves no money, an ordinary booking opens an in-app
+        // charge, and an emergency is settled in cash on the spot. Telling her
+        // the household "will be asked to pay" on a cash job would have her
+        // waiting for a transfer that is never coming.
         footnote: item.isRecurring
             ? 'The household will be told straight away.'
-            : 'The household will be asked to pay for this job.',
+            : item.isCashSettled
+                ? 'Collect the payment in cash. Both of you will be sent the '
+                    'amount owed.'
+                : 'The household will be asked to pay for this job.',
       ),
     );
     if (note == null) return;
@@ -388,7 +426,9 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
         messenger,
         item.isRecurring
             ? 'Marked done. The household has been told.'
-            : 'Marked done. The household has been asked to pay.',
+            : item.isCashSettled
+                ? 'Marked done. Collect the payment in cash.'
+                : 'Marked done. The household has been asked to pay.',
         tone: AppTone.success,
       );
     } on ApiException catch (error) {
@@ -401,22 +441,25 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
     }
   }
 
-  /// Whether this worker can still mark this visit done.
+  /// Whether to offer "Mark as done" on this card.
   ///
-  /// Not offered to a resident (it is the worker's statement about her own
-  /// work), on a day she is away for, or on a visit still awaiting her answer.
-  /// Future days are excluded because the server refuses them anyway, and an
-  /// enabled button that always fails is worse than no button.
-  bool get _canMarkDone {
-    if (!isWorker || item.isComplete) return false;
-    if (item.onLeave && !item.isCover) return false;
-    if (item.needsResponse) return false;
-
-    final today = DateTime.now();
-    final visit = item.date;
-    final startOfTomorrow = DateTime(today.year, today.month, today.day + 1);
-    return visit.isBefore(startOfTomorrow);
-  }
+  /// -----------------------------------------------------------------------
+  /// THIS DELIBERATELY ASKS THE SERVER RATHER THAN WORKING IT OUT
+  /// -----------------------------------------------------------------------
+  /// It used to reconstruct the rule here — worker, not complete, not on leave,
+  /// not awaiting a response, and dated before tomorrow — while the server
+  /// applied its own, different rule when the request actually arrived. The two
+  /// drifted, and both directions of the drift were user-visible: the button was
+  /// drawn on visits the server would refuse, and hidden on visits it would have
+  /// accepted. An emergency booking managed to hit both, which is why the maid
+  /// had no working way to close one out.
+  ///
+  /// So the only thing left here is the role check, which is genuinely a client
+  /// concern (this card is rendered for the household too, and a resident should
+  /// never be shown a control that makes a statement about somebody else's
+  /// work). Everything else is [ScheduleItem.canMarkDone], straight from the
+  /// server that will decide the request.
+  bool get _canMarkDone => isWorker && item.canMarkDone;
 
   @override
   Widget build(BuildContext context) {

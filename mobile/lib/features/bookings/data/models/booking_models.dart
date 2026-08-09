@@ -147,12 +147,22 @@ class DayAvailability {
 }
 
 enum BookingStatus {
+  /// Module 5.5 — an emergency whose fee has not settled. Nobody has been told
+  /// about it yet, which is the whole point of collecting the fee first.
+  paymentPending('payment_pending', 'Awaiting payment'),
+
+  /// Module 5.5 — out with several workers at once, unclaimed so far.
+  broadcast('broadcast', 'Finding someone'),
+
   pending('pending', 'Awaiting confirmation'),
   confirmed('confirmed', 'Confirmed'),
   completed('completed', 'Completed'),
   declined('declined', 'Declined'),
   cancelled('cancelled', 'Cancelled'),
-  expired('expired', 'No response');
+  expired('expired', 'No response'),
+
+  /// Module 5.5 — broadcast, and nobody took it before the deadline.
+  unfulfilled('unfulfilled', 'Nobody was free');
 
   const BookingStatus(this.wireValue, this.label);
 
@@ -219,6 +229,11 @@ class Booking {
     this.responseNote = '',
     this.isActionable = false,
     this.canBeCancelled = false,
+    this.canMarkDone = false,
+    this.isEmergency = false,
+    this.settlement = 'app',
+    this.emergencySurchargePaise = 0,
+    this.secondsLeftToClaim = 0,
     this.isPaid = false,
     this.cancellationFee = 0,
     this.cancelledBy = '',
@@ -253,6 +268,33 @@ class Booking {
   final bool isActionable;
   final bool canBeCancelled;
 
+  /// Whether "Mark as done" would be accepted right now.
+  ///
+  /// The **server's** answer, never re-derived here. The app used to work this
+  /// out for itself from the date, which disagreed with the server's rule and
+  /// produced both halves of the emergency-booking bug: a button offered where
+  /// the server would refuse it, and hidden where the server would have allowed
+  /// it. One rule, and it lives on the server.
+  final bool canMarkDone;
+
+  /// Module 5.5 — raised through the broadcast flow.
+  final bool isEmergency;
+
+  /// How the *worker's* fee is settled: `app` or `cash`.
+  ///
+  /// Sent by the server rather than inferred from the category, because getting
+  /// it wrong either way is a payment bug — an in-app charge on a cash job
+  /// double-charges the household, and a cash label on an app job leaves the
+  /// worker unpaid.
+  final String settlement;
+
+  /// Module 5.5 — the platform fee already paid for this request. Never the
+  /// worker's money.
+  final int emergencySurchargePaise;
+
+  /// How long workers still have to claim this request.
+  final int secondsLeftToClaim;
+
   /// Whether a settled payment already exists for this booking.
   final bool isPaid;
 
@@ -263,8 +305,21 @@ class Booking {
   bool get isPending => status == BookingStatus.pending;
   bool get isConfirmed => status == BookingStatus.confirmed;
 
+  /// Paid in cash, hand to hand. The app must never offer to collect it.
+  bool get isCashSettled => settlement == 'cash';
+
+  /// Raised and paid for, but nobody has taken it yet.
+  bool get isSeekingWorker =>
+      status == BookingStatus.paymentPending ||
+      status == BookingStatus.broadcast;
+
   /// Done, and nobody has settled the charge yet.
-  bool get needsPayment => status == BookingStatus.completed && !isPaid;
+  ///
+  /// Never true for a cash job: there is no in-app charge to settle, and
+  /// offering one would open a second, phantom payment for money that is about
+  /// to change hands in notes.
+  bool get needsPayment =>
+      status == BookingStatus.completed && !isPaid && !isCashSettled;
 
   /// Pending or confirmed — still occupies the worker's day.
   bool get isLive =>
@@ -311,10 +366,175 @@ class Booking {
         responseNote: json['response_note'] as String? ?? '',
         isActionable: json['is_actionable'] as bool? ?? false,
         canBeCancelled: json['can_be_cancelled'] as bool? ?? false,
+        canMarkDone: json['can_mark_done'] as bool? ?? false,
+        isEmergency: json['is_emergency'] as bool? ?? false,
+        settlement: json['settlement'] as String? ?? 'app',
+        emergencySurchargePaise:
+            json['emergency_surcharge_paise'] as int? ?? 0,
+        secondsLeftToClaim: json['seconds_left_to_claim'] as int? ?? 0,
         isPaid: json['is_paid'] as bool? ?? false,
         cancellationFee: toDoubleOrZero(json['cancellation_fee']).round(),
         cancelledBy: json['cancelled_by'] as String? ?? '',
         cancellationReason: json['cancellation_reason'] as String? ?? '',
+      );
+}
+
+/// Module 5.5 — what raising an emergency right now would cost.
+///
+/// Two figures live in this flow and only one of them is on this quote. This is
+/// Sathify's fee for running the broadcast, charged through the app. The
+/// worker's own fee is cash, paid to them directly, and [workerFeeNote] is the
+/// server's wording for saying so on the screen that collects the first one.
+class SurchargeQuote {
+  const SurchargeQuote({
+    required this.rupees,
+    required this.leadDays,
+    this.rationale = '',
+    this.workerFeeNote = '',
+  });
+
+  final int rupees;
+
+  /// Days between today and the service date. 0 today, 1 tomorrow.
+  final int leadDays;
+  final String rationale;
+  final String workerFeeNote;
+
+  factory SurchargeQuote.fromJson(Map<String, dynamic> json) => SurchargeQuote(
+        rupees: json['surcharge_rupees'] as int? ?? 0,
+        leadDays: json['lead_days'] as int? ?? 0,
+        rationale: json['rationale'] as String? ?? '',
+        workerFeeNote: json['worker_fee_note'] as String? ?? '',
+      );
+}
+
+/// Where one worker's offer on a broadcast request has got to.
+enum OfferState {
+  offered('offered', 'Waiting'),
+  accepted('accepted', 'You took this'),
+  declined('declined', 'You passed'),
+  lost('lost', 'Someone else took it'),
+  expired('expired', 'Expired');
+
+  const OfferState(this.wireValue, this.label);
+
+  final String wireValue;
+  final String label;
+
+  static OfferState fromWire(String? value) => OfferState.values.firstWhere(
+        (s) => s.wireValue == value,
+        orElse: () => OfferState.offered,
+      );
+}
+
+/// Module 5.5 — an emergency request as it appears on a worker's dashboard.
+///
+/// Flat rather than a nested booking, because this is the payload a poll
+/// returns every few seconds while a request is live: it carries what the card
+/// draws and nothing else.
+class EmergencyOffer {
+  const EmergencyOffer({
+    required this.id,
+    required this.bookingId,
+    required this.state,
+    required this.categoryName,
+    required this.scheduledDate,
+    required this.startTime,
+    required this.quotedPrice,
+    this.categoryIcon = '',
+    this.flatLabel = '',
+    this.durationMinutes = 60,
+    this.notes = '',
+    this.expiresAt,
+    this.secondsLeft = 0,
+    this.rank = 0,
+  });
+
+  final int id;
+
+  /// The **booking** id — what the accept and decline endpoints take, and what
+  /// the push notification carries.
+  final int bookingId;
+
+  final OfferState state;
+  final String categoryName;
+  final String categoryIcon;
+  final String flatLabel;
+  final DateTime scheduledDate;
+  final String startTime;
+  final int durationMinutes;
+  final int quotedPrice;
+  final String notes;
+  final DateTime? expiresAt;
+
+  /// Server-computed at the moment of the response. The card counts down from
+  /// this locally rather than re-deriving it from [expiresAt], so a phone with
+  /// a wrong clock still shows a sensible number.
+  final int secondsLeft;
+
+  /// Where this worker ranked in the match. Not shown; useful in logs.
+  final int rank;
+
+  bool get isOpen => state == OfferState.offered;
+
+  String get startTimeLabel => formatBookingTime(startTime);
+
+  factory EmergencyOffer.fromJson(Map<String, dynamic> json) => EmergencyOffer(
+        id: json['id'] as int? ?? 0,
+        bookingId: json['booking_id'] as int? ?? 0,
+        state: OfferState.fromWire(json['state'] as String?),
+        categoryName: json['category_name'] as String? ?? 'Emergency',
+        categoryIcon: json['category_icon'] as String? ?? 'emergency',
+        flatLabel: json['flat_label'] as String? ?? '',
+        scheduledDate: DateTime.tryParse(
+              json['scheduled_date'] as String? ?? '',
+            ) ??
+            DateTime.now(),
+        startTime: json['start_time'] as String? ?? '',
+        durationMinutes: json['duration_minutes'] as int? ?? 60,
+        quotedPrice: toDoubleOrZero(json['quoted_price']).round(),
+        notes: json['notes'] as String? ?? '',
+        expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? ''),
+        secondsLeft: json['seconds_left'] as int? ?? 0,
+        rank: json['rank'] as int? ?? 0,
+      );
+}
+
+/// One poll of `/bookings/emergency/live/`, whichever side asked.
+///
+/// [version] is a change stamp over the rows behind the response. A screen that
+/// sees the same version twice can skip its rebuild, which is what makes a
+/// five-second interval cheap enough to justify.
+class EmergencyLiveState {
+  const EmergencyLiveState({
+    this.role = '',
+    this.offers = const [],
+    this.requests = const [],
+    this.version = '',
+  });
+
+  final String role;
+
+  /// Worker side: requests currently offered to them.
+  final List<EmergencyOffer> offers;
+
+  /// Resident side: their own open and just-claimed requests.
+  final List<Booking> requests;
+
+  final String version;
+
+  bool get hasLiveWork => offers.isNotEmpty || requests.any((r) => r.isSeekingWorker);
+
+  factory EmergencyLiveState.fromJson(Map<String, dynamic> json) =>
+      EmergencyLiveState(
+        role: json['role'] as String? ?? '',
+        offers: ((json['offers'] as List?) ?? const [])
+            .map((row) => EmergencyOffer.fromJson(row as Map<String, dynamic>))
+            .toList(),
+        requests: ((json['requests'] as List?) ?? const [])
+            .map((row) => Booking.fromJson(row as Map<String, dynamic>))
+            .toList(),
+        version: json['version'] as String? ?? '',
       );
 }
 

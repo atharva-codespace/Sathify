@@ -107,6 +107,20 @@ class ScheduleItem:
     completion_note: str = ""
     completion_photo_url: str = ""
 
+    #: Whether the worker may mark this visit done *right now*.
+    #:
+    #: Decided here and sent to the client, rather than re-derived there. The
+    #: app used to work it out for itself from the visit date and a handful of
+    #: flags, which is how the "Work done" button came to be missing on exactly
+    #: the visits that needed it: the two rules had drifted, and the client's
+    #: version was the one drawing the button. One rule, computed where the
+    #: refusal is also decided, so the button and the endpoint cannot disagree.
+    can_mark_done: bool = False
+
+    #: How the worker's fee is settled: ``app`` or ``cash``. An emergency is
+    #: cash, hand to hand, and the card must not offer to collect it.
+    settlement: str = "app"
+
     # --- 6.7 what this visit is worth ---------------------------------------
     #
     # ``pay_paise`` is the day's rate — what this visit is worth *if* it is
@@ -184,10 +198,32 @@ def _engagement_queryset(**filters):
     )
 
 
+#: Booking statuses that belong on a schedule.
+#:
+#: COMPLETED is here, and its absence was half of a real bug. A worker tapped
+#: "Mark as done", the server moved the booking to COMPLETED, and the card then
+#: vanished from her schedule entirely — because this filter no longer matched
+#: it. From where she was standing the button had deleted her job rather than
+#: finished it, and the obvious response to that is to assume it failed.
+#:
+#: A finished visit is still a fact about the day: the household wants to see it
+#: happened, the gate roster still needs her to be able to leave, and Module 6.6
+#: has a "Work marked done" state that nothing could ever render while the row
+#: was being filtered out from underneath it.
+#:
+#: The emergency statuses are deliberately *not* here. PAYMENT_PENDING and
+#: BROADCAST have no worker, so there is no schedule for them to be on yet.
+SCHEDULE_BOOKING_STATUSES = [
+    BookingStatus.PENDING,
+    BookingStatus.CONFIRMED,
+    BookingStatus.COMPLETED,
+]
+
+
 def _booking_queryset(start: dt.date, end: dt.date, **filters):
     return (
         Booking.objects.filter(
-            status__in=[BookingStatus.PENDING, BookingStatus.CONFIRMED],
+            status__in=SCHEDULE_BOOKING_STATUSES,
             scheduled_date__gte=start,
             scheduled_date__lte=end,
             **filters,
@@ -383,6 +419,21 @@ def _visit_progress(completion, attendance) -> dict:
     }
 
 
+def _engagement_can_mark_done(day: dt.date, completion, leave) -> bool:
+    """Whether a recurring visit is markable today.
+
+    Not on a future day — there is nothing to have finished yet. Not twice. Not
+    on a day the regular worker is away for, since the item on *her* schedule
+    describes an absence rather than work; the replacement sees the same visit
+    through :func:`_cover_item`, which carries no leave and is markable.
+    """
+    if completion is not None:
+        return False
+    if leave is not None:
+        return False
+    return day <= timezone.localdate()
+
+
 def _engagement_item(
     engagement, day: dt.date, leave=None, progress=None, completion=None
 ) -> ScheduleItem:
@@ -413,6 +464,7 @@ def _engagement_item(
         cover_worker_name=cover.user.get_full_name() if cover else "",
         pay_paise=pay_paise,
         pay_state=pay_state,
+        can_mark_done=_engagement_can_mark_done(day, completion, leave),
         **(progress or {}),
     )
 
@@ -449,6 +501,9 @@ def _cover_item(leave) -> ScheduleItem:
         leave_request_id=leave.pk,
         is_cover=True,
         covering_for_name=leave.worker.user.get_full_name(),
+        # The replacement is the one actually working this visit, so she is the
+        # one who gets to say it is finished.
+        can_mark_done=leave.leave_date <= timezone.localdate(),
     )
 
 
@@ -479,6 +534,12 @@ def _cover_items(days: list[dt.date], **filters) -> list[ScheduleItem]:
 
 
 def _booking_item(booking, progress=None, completion=None) -> ScheduleItem:
+    # Computed once. It used to be called twice, one call per tuple element,
+    # which meant two payments imports and two rate lookups per booking on every
+    # schedule read.
+    pay_paise, pay_state = _pay_for(
+        "booking", booking, completion, booking.scheduled_date
+    )
     return ScheduleItem(
         source="booking",
         source_id=booking.pk,
@@ -497,8 +558,12 @@ def _booking_item(booking, progress=None, completion=None) -> ScheduleItem:
         is_confirmed=booking.status == BookingStatus.CONFIRMED,
         expected_arrival=booking.start_time,
         task_notes=booking.notes,
-        pay_paise=_pay_for("booking", booking, completion, booking.scheduled_date)[0],
-        pay_state=_pay_for("booking", booking, completion, booking.scheduled_date)[1],
+        pay_paise=pay_paise,
+        pay_state=pay_state,
+        # Straight off the booking, so the schedule card and the completion
+        # endpoint answer to the same rule. See ``Booking.can_be_completed``.
+        can_mark_done=completion is None and booking.can_be_completed,
+        settlement="cash" if booking.is_emergency else "app",
         **(progress or {}),
     )
 

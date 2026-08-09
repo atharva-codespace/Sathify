@@ -164,6 +164,7 @@ endpoint the external uptime pinger (§2) can call, and a management command:
 | --- | --- |
 | 4.4 | `HireRequest.objects.expire_lapsed()` |
 | 5.2 | `Booking.objects.expire_stale()` |
+| 5.5 | `emergency.expire_unclaimed()` — closes a broadcast nobody claimed, **and refunds its surcharge** |
 | 6.4 | `due_reminders()` → Module 10's `deliver_due_reminders()` |
 | 9.3 | `recompute_trust_scores` command |
 | 11.3 | `escalate_overdue()` |
@@ -171,6 +172,38 @@ endpoint the external uptime pinger (§2) can call, and a management command:
 
 Every one is safe to run twice. That is the property that makes "whoever happens
 to load the screen" an acceptable trigger.
+
+---
+
+## 8. No Channels, no Redis — so "real time" is a bounded poll
+
+Module 5.5 broadcasts one emergency request to several workers at once, and the
+instant one of them accepts, the card has to disappear from everybody else's
+screen. That is a socket-shaped requirement, and §7's constraint rules a socket
+out: Django Channels needs ASGI plus a channel layer, the only free channel
+layer worth having is Redis, and there is no second service to run either in.
+
+**Decision: a small dedicated endpoint (`/bookings/emergency/live/`), polled
+only while a request is actually in flight.**
+
+The cost is controlled by *when* it runs rather than by how often:
+
+| State | Interval |
+| --- | --- |
+| A worker has an open offer, or a resident has an unclaimed request | 5 s |
+| Signed in, nothing in flight | 30 s |
+| App backgrounded | not at all |
+
+An emergency lives for at most ten minutes (`emergency.OFFER_WINDOW`), so the
+5-second rate applies to a few minutes a day at most, and the endpoint itself
+returns one indexed lookup's worth of rows plus a `version` stamp the client
+uses to skip rebuilds. The 30-second idle rate is what notices a *new* request
+on a phone whose push never arrived — which, in any build without
+`google-services.json`, is every phone.
+
+If Channels ever becomes affordable, the client contract does not change: the
+same payload can be pushed instead of pulled, and `EmergencyLiveRefresher` is
+the only thing that has to know the difference.
 
 ---
 

@@ -38,6 +38,7 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 RAZORPAY_ORDERS_URL = "https://api.razorpay.com/v1/orders"
+RAZORPAY_PAYMENTS_URL = "https://api.razorpay.com/v1/payments"
 
 #: Razorpay is a payment gateway on the far side of a mobile network. Long
 #: enough to survive a slow round trip, short enough that a resident is not
@@ -143,6 +144,47 @@ def create_order(*, amount_paise: int, receipt: str, notes: dict | None = None) 
     return response.json()
 
 
+def create_refund(
+    *, payment_id: str, amount_paise: int, notes: dict | None = None
+) -> dict:
+    """Ask Razorpay to refund a captured payment.
+
+    Best-effort by contract: the caller records the refund in the ledger whether
+    or not this succeeds, and reconciles from the ``refund.*`` webhook. See
+    ``services.refund_payment`` for why that asymmetry with settlement is
+    deliberate rather than sloppy.
+
+    Raises :class:`GatewayError` on anything that is not a success, so the caller
+    can log the difference between "refunded at the gateway" and "recorded here
+    only" — a distinction an operator needs and a user never sees.
+    """
+    assert_not_live()
+
+    if not is_configured():
+        raise GatewayUnavailable("Razorpay is not configured on this server.")
+
+    config = _config()
+    try:
+        response = requests.post(
+            f"{RAZORPAY_PAYMENTS_URL}/{payment_id}/refund",
+            json={"amount": int(amount_paise), "notes": notes or {}},
+            auth=(config["KEY_ID"], config["KEY_SECRET"]),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        raise GatewayUnavailable("Could not reach the payment provider.") from exc
+
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            detail = response.json().get("error", {}).get("description", "")
+        except ValueError:
+            detail = response.text[:200]
+        raise GatewayError(detail or "The payment provider refused this refund.")
+
+    return response.json()
+
+
 def verify_checkout_signature(
     *, order_id: str, payment_id: str, signature: str
 ) -> bool:
@@ -211,6 +253,7 @@ __all__ = [
     "assert_not_live",
     "checkout_payload",
     "create_order",
+    "create_refund",
     "is_configured",
     "verify_checkout_signature",
     "verify_webhook_signature",

@@ -24,6 +24,7 @@ charged must not silently change with it.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 
 #: Cancel this many hours or more before the start: no fee. Roughly the window
@@ -40,6 +41,73 @@ PARTIAL_FEE_RATE = 0.5
 #: Default minimum notice for a booking, when the society has not set its own.
 #: ``Society.booking_notice_hours`` is the real source; this is the fallback.
 DEFAULT_NOTICE_HOURS = 12
+
+
+# ---------------------------------------------------------------------------
+# 5.5 Emergency surcharge
+# ---------------------------------------------------------------------------
+#
+# This is the *platform's* fee for running an emergency broadcast, and it is the
+# only money Sathify moves for one. The worker's own fee is settled in cash
+# between the household and the worker, outside the app entirely — see
+# ``bookings/emergency.py``. Keeping the two apart matters: this table must
+# never be mistaken for what the worker is owed.
+#
+# Priced by how much notice the platform actually gets, because that is what the
+# fee buys: an emergency raised for today has to interrupt people who had other
+# plans, and one raised for tomorrow does not.
+
+#: Days of lead time → surcharge in whole rupees. Any lead time not listed is
+#: not an emergency in any meaningful sense and is charged nothing.
+EMERGENCY_SURCHARGE_RUPEES: dict[int, int] = {
+    0: 100,  # raised on the service day itself
+    1: 50,   # raised the day before
+}
+
+#: Beyond this many days ahead, the emergency flow is refused outright rather
+#: than sold at ₹0 — a "next week emergency" is an ordinary booking, and the
+#: directed flow serves the household better because they get to choose who
+#: comes.
+MAX_EMERGENCY_LEAD_DAYS = max(EMERGENCY_SURCHARGE_RUPEES)
+
+
+@dataclass(frozen=True)
+class SurchargeQuote:
+    """What raising this emergency costs the household, and why."""
+
+    rupees: int
+    lead_days: int
+    rationale: str
+
+    @property
+    def paise(self) -> int:
+        return self.rupees * 100
+
+
+def emergency_surcharge(
+    *, scheduled_date: dt.date, raised_on: dt.date
+) -> SurchargeQuote:
+    """Price an emergency request from how far ahead it was raised.
+
+    Measured in whole local days rather than hours. A household raising a job
+    for "tonight" at 09:00 and another raising it at 21:00 are both asking the
+    platform to fill a slot today, and charging them differently for the hour
+    they happened to open the app would be arbitrary in a way they could feel.
+
+    A date in the past reads as same-day: the request is as urgent as it gets,
+    and refusing it here would be the wrong place to enforce that.
+    """
+    lead_days = max(0, (scheduled_date - raised_on).days)
+    rupees = EMERGENCY_SURCHARGE_RUPEES.get(lead_days, 0)
+
+    if lead_days == 0:
+        why = "Raised for today."
+    elif lead_days == 1:
+        why = "Raised a day ahead."
+    else:
+        why = f"Raised {lead_days} days ahead — no emergency fee applies."
+
+    return SurchargeQuote(rupees=rupees, lead_days=lead_days, rationale=why)
 
 
 @dataclass(frozen=True)

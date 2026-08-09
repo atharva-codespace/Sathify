@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/routing/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/presentation/providers/auth_provider.dart';
+import 'features/bookings/presentation/widgets/emergency_live_refresher.dart';
 import 'features/notifications/data/push_service.dart';
 import 'features/notifications/presentation/providers/notification_provider.dart';
 import 'features/notifications/presentation/widgets/notification_badge_refresher.dart';
@@ -72,7 +73,16 @@ class _SathifyAppState extends ConsumerState<SathifyApp> {
     // Wraps the whole app rather than sitting on one screen: the badge is in
     // every role's app bar, and push is not guaranteed to be available at all
     // (a build without google-services.json has none). See the widget.
+    // Both refreshers wrap the whole app rather than sitting on one screen.
+    //
+    // For the emergency one that is load-bearing, not tidiness: a worker who is
+    // on her earnings screen when a request goes out still has to see it, and a
+    // resident who navigated away from the request they just raised still has to
+    // be told who accepted it. Anchoring the poll to a screen would mean the
+    // update only arrives for people who happened to be looking at the right
+    // place. It is idle-cheap by construction — see the widget.
     return NotificationBadgeRefresher(
+      child: EmergencyLiveRefresher(
       child: MaterialApp.router(
         title: 'Sathify',
         debugShowCheckedModeBanner: false,
@@ -98,6 +108,7 @@ class _SathifyAppState extends ConsumerState<SathifyApp> {
           GlobalWidgetsLocalizations.delegate,
           GlobalCupertinoLocalizations.delegate,
         ],
+      ),
       ),
     );
   }

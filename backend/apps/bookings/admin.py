@@ -12,7 +12,7 @@ would break the audit trail Module 8 settles against.
 
 from django.contrib import admin
 
-from .models import Booking, DayAvailability, ServiceCategory
+from .models import Booking, BookingOffer, DayAvailability, ServiceCategory
 
 
 @admin.register(ServiceCategory)
@@ -85,8 +85,43 @@ class BookingAdmin(admin.ModelAdmin):
         "cancelled_by",
         "cancellation_fee",
         "scheduled_start",
+        # Module 5.5. Read-only for the same reason the cancellation fee is:
+        # this is what a household was actually charged for a broadcast, and an
+        # operator editing it after the fact would break the trail Module 8
+        # reconciles against.
+        "emergency_surcharge_paise",
+        "broadcast_at",
     )
+    inlines = ()
 
     @admin.display(description="Starts at")
     def scheduled_start(self, obj):
         return obj.scheduled_start
+
+
+@admin.register(BookingOffer)
+class BookingOfferAdmin(admin.ModelAdmin):
+    """Module 5.5 — who a broadcast was actually put to, and what they said.
+
+    Entirely read-only. This is the answer to "six workers were free, so why did
+    my request lapse?", and it is only worth having if nobody can tidy it up
+    afterwards. Editing ``state`` by hand could also invent a second accepted
+    offer, which is the one thing the whole flow is built to prevent.
+    """
+
+    list_display = ("booking", "worker", "state", "rank", "responded_at", "created_at")
+    list_filter = ("state", "created_at")
+    search_fields = (
+        "booking__id",
+        "worker__user__first_name",
+        "worker__user__last_name",
+        "worker__user__phone_number",
+    )
+    list_select_related = ("booking__category", "worker__user")
+    raw_id_fields = ("booking", "worker")
+    readonly_fields = (
+        "booking", "worker", "state", "rank", "responded_at", "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False

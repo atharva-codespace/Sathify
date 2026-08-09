@@ -292,7 +292,14 @@ def receipt_dict(payment: Payment) -> dict:
         "kind": payment.get_kind_display(),
         "description": _describe(payment),
         "paid_at": payment.paid_at,
-        "worker_name": payment.worker.user.get_full_name(),
+        # A platform charge (Module 5.5's emergency surcharge) has no worker.
+        # The receipt names Sathify rather than leaving a blank where a person's
+        # name goes — a receipt that says who was paid is the point of it.
+        "worker_name": (
+            payment.worker.user.get_full_name()
+            if payment.worker_id is not None
+            else "Sathify"
+        ),
         "resident_name": payment.resident.user.get_full_name(),
         "flat": str(payment.resident.flat),
         "amount_paise": payment.amount_paise,

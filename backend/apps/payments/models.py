@@ -72,6 +72,17 @@ class PaymentKind(models.TextChoices):
     REFUND = "refund", _("Refund")
     #: A same-day replacement's share, split per Module 8.5's rule.
     REPLACEMENT = "replacement", _("Replacement worker's share")
+    #: Module 5.5 — the platform's fee for running an emergency broadcast.
+    #:
+    #: The only kind that is owed to Sathify rather than to a worker, which is
+    #: why it is the only kind whose ``worker`` is null. The emergency worker's
+    #: own fee is cash and has no row here at all — see bookings/emergency.py.
+    EMERGENCY_SURCHARGE = "emergency_surcharge", _("Emergency booking fee")
+
+
+#: Kinds the platform collects for itself. Excluded from anything that answers
+#: "what has this worker earned", because the answer is "none of it".
+PLATFORM_KINDS = frozenset({PaymentKind.EMERGENCY_SURCHARGE})
 
 
 class PaymentStatus(models.TextChoices):
@@ -108,8 +119,17 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
     resident = models.ForeignKey(
         "societies.Resident", on_delete=models.PROTECT, related_name="payments"
     )
+    #: Null only on a platform charge — today, the Module 5.5 emergency
+    #: surcharge, which is owed to Sathify and not to anybody's wages. Every
+    #: worker-facing query filters on this column, so a null row simply does not
+    #: appear in an earnings figure, which is the correct answer rather than a
+    #: special case somebody has to remember.
     worker = models.ForeignKey(
-        "workers.WorkerProfile", on_delete=models.PROTECT, related_name="payments"
+        "workers.WorkerProfile",
+        on_delete=models.PROTECT,
+        related_name="payments",
+        null=True,
+        blank=True,
     )
 
     # What this pays for. Both nullable and non-exclusive: a tip belongs to
@@ -249,13 +269,23 @@ class Payment(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
         return (timezone.now() - self.due_at).days if self.is_overdue else 0
 
     @property
+    def is_platform_charge(self) -> bool:
+        """Owed to Sathify rather than to a worker."""
+        return self.kind in PLATFORM_KINDS
+
+    @property
     def worker_receives_paise(self) -> int:
         """What reaches the worker. The number that must never quietly shrink.
 
         Deliberately its own property rather than "total minus fee": a reader
         checking whether a fee was taken out of somebody's wage should find one
         expression that says it was not.
+
+        Zero on a platform charge, because no worker is party to it — not
+        "the amount, attributed to nobody".
         """
+        if self.is_platform_charge or self.worker_id is None:
+            return 0
         return self.amount_paise + self.tip_paise
 
     @property

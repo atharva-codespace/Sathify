@@ -327,7 +327,9 @@ def create_payment(
     )
     logger.info(
         "Payment %s created: %s paise (%s) resident=%s worker=%s",
-        payment.receipt_number, payment.total_paise, kind, resident.pk, worker.pk,
+        payment.receipt_number, payment.total_paise, kind, resident.pk,
+        # None on a platform charge — see the field comment on Payment.worker.
+        getattr(worker, "pk", None),
     )
     return payment
 
@@ -394,8 +396,54 @@ def confirm_checkout(payment: Payment, *, razorpay_payment_id: str, signature: s
         )
 
     locked.mark_paid(razorpay_payment_id=razorpay_payment_id, signature=signature)
-    _notify_worker_paid(locked)
+    on_payment_settled(locked)
     return locked
+
+
+def on_payment_settled(payment: Payment) -> None:
+    """Everything that has to happen the moment money actually lands.
+
+    ---------------------------------------------------------------------------
+    ONE HOOK, TWO SETTLEMENT PATHS
+    ---------------------------------------------------------------------------
+    A payment reaches PAID down either of two routes — the client handing back a
+    signed checkout response, or a webhook — and which one wins is a race
+    decided by mobile network latency. Anything that must follow settlement
+    therefore has to hang off both, and hanging it off both by hand is how one
+    of them ends up missing a step.
+
+    So both call this, and only this. It is safe to run twice: every branch is
+    either idempotent in its own right or guarded by the state it moves.
+    """
+    _notify_worker_paid(payment)
+    _release_emergency(payment)
+
+
+def _release_emergency(payment: Payment) -> None:
+    """Module 5.5 — a settled surcharge is what opens the broadcast.
+
+    This is the join that makes "payment first, workers second" true rather than
+    merely intended: there is no other code path that can move an emergency
+    booking out of PAYMENT_PENDING, so an unpaid request cannot reach a single
+    worker's phone even if a client asks it to.
+
+    Lazily imported and non-raising, for the reason every cross-module call on a
+    write path is: a broadcast that fails must not un-settle the payment. The
+    request stays PAYMENT_PENDING and the next read sweep or a retried webhook
+    picks it up.
+    """
+    if payment.kind != PaymentKind.EMERGENCY_SURCHARGE or payment.booking_id is None:
+        return
+
+    try:
+        from apps.bookings.emergency import broadcast
+
+        broadcast(payment.booking)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception(
+            "Could not broadcast emergency booking %s after payment %s settled",
+            payment.booking_id, payment.pk,
+        )
 
 
 def _notify_worker_paid(payment: Payment) -> None:
@@ -404,10 +452,17 @@ def _notify_worker_paid(payment: Payment) -> None:
     Lazily imported and non-raising: a settled payment must never be undone
     because a phone was unreachable. This is arguably the single most welcome
     notification the platform sends.
+
+    Silent on a platform charge: the emergency surcharge is Sathify's fee, and
+    telling a worker she has "been paid" an amount she will never receive would
+    be worse than telling her nothing.
     """
     from apps.notifications.models import NotificationCategory
     from apps.notifications.services import notify
     from .models import format_paise
+
+    if payment.worker_id is None or payment.is_platform_charge:
+        return
 
     notify(
         recipient=payment.worker.user,
@@ -418,6 +473,59 @@ def _notify_worker_paid(payment: Payment) -> None:
         data={"route": "/earnings", "payment_id": str(payment.pk)},
         society=payment.society,
     )
+
+
+# ---------------------------------------------------------------------------
+# Refunds
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def refund_payment(payment: Payment, *, reason: str = "") -> bool:
+    """Give a settled payment back. Returns whether anything moved.
+
+    ---------------------------------------------------------------------------
+    THE LEDGER IS WRITTEN EVEN IF THE GATEWAY CANNOT BE REACHED
+    ---------------------------------------------------------------------------
+    Deliberately the opposite way round from settlement. PAID is only ever
+    reached through a verified signature, because the party asserting success
+    benefits from lying about it. A refund has no such incentive problem — the
+    platform is giving money back — and the failure modes are asymmetric: a
+    ledger that says "refunded" while Razorpay has not yet processed it is
+    reconciled by the ``refund.*`` webhook that follows, whereas a refund the
+    ledger never recorded is money nobody knows to chase.
+
+    So the local record is authoritative for *our* books and the gateway call is
+    best-effort. In test mode, which is where this deployment lives
+    (docs/free-tier-constraints.md §6), there is no real money to move at all.
+    """
+    locked = Payment.objects.select_for_update().get(pk=payment.pk)
+    if locked.status != PaymentStatus.PAID:
+        return False
+
+    if locked.razorpay_payment_id:
+        try:
+            gateway.create_refund(
+                payment_id=locked.razorpay_payment_id,
+                amount_paise=locked.total_paise,
+                notes={"receipt_number": locked.receipt_number, "reason": reason[:120]},
+            )
+        except gateway.GatewayError:
+            # Recorded and left for reconciliation rather than raised — see the
+            # docstring. The operator sees an unmatched refund in the ledger,
+            # which is a question they can answer.
+            logger.warning(
+                "Razorpay refund failed for %s; recorded locally anyway",
+                locked.receipt_number,
+            )
+
+    locked.mark_refunded()
+    if reason:
+        locked.note = f"{locked.note} {reason}".strip()[:300]
+        locked.save(update_fields=["note", "updated_at"])
+
+    logger.info("Payment %s refunded: %s", locked.receipt_number, reason)
+    return True
 
 
 def _payment_for_event(entity: dict) -> Payment | None:
@@ -475,7 +583,7 @@ def apply_webhook(event: WebhookEvent) -> Payment | None:
         if payment.mark_paid(
             razorpay_payment_id=entity.get("id", ""), signature="webhook"
         ):
-            _notify_worker_paid(payment)
+            on_payment_settled(payment)
     elif event.event_type == "payment.failed":
         payment.mark_failed(
             reason=entity.get("error_description", "The payment failed.")
@@ -546,9 +654,11 @@ __all__ = [
     "confirm_checkout",
     "create_payment",
     "daily_rate_paise",
+    "on_payment_settled",
     "open_order",
     "payment_due_at",
     "record_webhook",
+    "refund_payment",
     "salary_basis",
     "split_for_replacement",
 ]

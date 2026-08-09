@@ -39,7 +39,7 @@ from apps.scheduling.services import conflicted_worker_ids
 from apps.workers.models import WorkerProfile
 
 from .models import Booking, BookingStatus, DayAvailability, ServiceCategory, minutes_of
-from .policy import cancellation_outcome, check_notice_period
+from .policy import CancellationOutcome, cancellation_outcome, check_notice_period
 
 logger = logging.getLogger(__name__)
 
@@ -395,10 +395,7 @@ def cancel_booking(
             "Only a booking that has not started yet can be cancelled."
         )
 
-    outcome = cancellation_outcome(
-        hours_until_start=locked.hours_until_start,
-        quoted_price=locked.quoted_price,
-    )
+    outcome = _cancellation_outcome_for(locked)
 
     locked.status = BookingStatus.CANCELLED
     locked.cancelled_at = timezone.now()
@@ -415,6 +412,14 @@ def cancel_booking(
             "updated_at",
         ]
     )
+
+    # An emergency that nobody had taken yet has to give the surcharge back and
+    # stop ringing phones about a job that is no longer happening. Both are
+    # emergency-module concerns, imported lazily to keep Module 5's core free of
+    # them — and both are no-ops on an ordinary booking.
+    from .emergency import settle_cancelled_emergency
+
+    settle_cancelled_emergency(locked, had_worker=bool(booking.worker_id))
 
     logger.info(
         "Booking %s cancelled by %s; fee %s (%s)",
@@ -436,11 +441,16 @@ def complete_booking(booking: Booking) -> Booking:
     """
     locked = Booking.objects.select_for_update().get(pk=booking.pk)
 
+    if locked.status == BookingStatus.COMPLETED:
+        # Idempotent. Two routes settle a booking — this one and Module 6.6's
+        # completion mark — and both can legitimately arrive for the same job.
+        return locked
+
     if locked.status != BookingStatus.CONFIRMED:
         raise BookingNotActionable("Only a confirmed booking can be completed.")
-    if not locked.has_started:
+    if not locked.can_be_completed:
         raise BookingNotActionable(
-            "This booking has not started yet, so it cannot be marked complete."
+            "This booking is for a later date, so it cannot be marked complete yet."
         )
 
     locked.status = BookingStatus.COMPLETED
@@ -458,7 +468,17 @@ def complete_booking(booking: Booking) -> Booking:
     # .CreateBookingPaymentView). Nothing was telling the resident that, so the
     # money waited until they happened to reopen the booking screen. The worker
     # has finished and is standing there; this is exactly when to ask.
-    _prompt_for_payment(locked)
+    #
+    # Except on an emergency, where the worker's fee is settled in cash between
+    # the two of them and the app has no part in it. Opening a Razorpay order
+    # for money that is about to be handed over in notes would produce a second,
+    # phantom charge and a receipt for a payment that never happens. The
+    # household is told the job is done and reminded what they owe in cash
+    # instead — see ``_confirm_cash_settlement``.
+    if locked.is_emergency:
+        _confirm_cash_settlement(locked)
+    else:
+        _prompt_for_payment(locked)
 
     # Module 9 builds a "jobs you can still rate" list, but nothing was telling
     # anyone it existed — a rating that nobody is prompted for is a rating
@@ -508,6 +528,54 @@ def _prompt_for_payment(booking: Booking) -> None:
     )
 
 
+def _confirm_cash_settlement(booking: Booking) -> None:
+    """Tell both sides an emergency job is done and what is owed, in cash.
+
+    ---------------------------------------------------------------------------
+    WHY THE HOUSEHOLD IS TOLD AT ALL, WHEN THE APP MOVES NO MONEY
+    ---------------------------------------------------------------------------
+    It would be simpler to say nothing: the money is outside the app, so the app
+    has no business in it. But the worker's only protection against "I already
+    paid you" is a timestamped record that both parties were told the same
+    figure at the same moment, and that costs one notification each.
+
+    This is also why completion is not gated on the resident confirming it.
+    Requiring the household to countersign would hand whoever holds the cash a
+    veto over the record of the work — exactly the imbalance this platform
+    exists to reduce. If they disagree, Module 8.6's dispute route is open to
+    them and goes to a person.
+
+    Lazily imported and non-raising, like every other Module 10 call site.
+    """
+    from apps.notifications.models import NotificationCategory
+    from apps.notifications.services import notify
+
+    worker_name = booking.worker.user.get_full_name()
+
+    notify(
+        recipient=booking.resident.user,
+        category=NotificationCategory.PAYMENT,
+        title=f"₹{booking.quoted_price} due to {worker_name} in cash",
+        body=(
+            f"{worker_name} has marked the emergency job complete. This one is "
+            "paid directly in cash — Sathify does not collect it."
+        ),
+        data={"route": "/bookings", "booking": booking.pk, "settlement": "cash"},
+        society=booking.society,
+    )
+    notify(
+        recipient=booking.worker.user,
+        category=NotificationCategory.PAYMENT,
+        title=f"₹{booking.quoted_price} to collect in cash",
+        body=(
+            f"{booking.resident.user.get_full_name()} has been told the job is "
+            "done and what is owed."
+        ),
+        data={"route": "/bookings", "booking": booking.pk, "settlement": "cash"},
+        society=booking.society,
+    )
+
+
 def _prompt_for_rating(booking: Booking) -> None:
     """Ask both parties to rate a finished job (Module 10, RATING).
 
@@ -534,16 +602,35 @@ def _prompt_for_rating(booking: Booking) -> None:
         )
 
 
+def _cancellation_outcome_for(booking: Booking):
+    """The fee for cancelling this specific booking.
+
+    Wraps the pure policy function with the one case it cannot see: a booking
+    nobody has accepted. The fee compensates a worker who turned other work away
+    for a slot they can no longer fill, and an unclaimed emergency has no such
+    worker — charging for it would be charging the household for the platform's
+    failure to find anybody.
+    """
+    if booking.worker_id is None:
+        return CancellationOutcome(
+            fee=0,
+            tier="free",
+            rationale="Nobody had accepted this job yet, so there is no fee.",
+        )
+
+    return cancellation_outcome(
+        hours_until_start=booking.hours_until_start,
+        quoted_price=booking.quoted_price,
+    )
+
+
 def cancellation_quote(booking: Booking) -> dict:
     """What cancelling right now would cost, for the confirmation dialog.
 
     Shown before the resident commits: a fee that appears only after the fact
     is the kind of surprise that makes people stop trusting the app.
     """
-    outcome = cancellation_outcome(
-        hours_until_start=booking.hours_until_start,
-        quoted_price=booking.quoted_price,
-    )
+    outcome = _cancellation_outcome_for(booking)
     return {
         "fee": outcome.fee,
         "tier": outcome.tier,

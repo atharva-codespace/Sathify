@@ -32,6 +32,7 @@ import '../../features/ratings/presentation/screens/trust_score_screen.dart';
 import '../../features/ratings/presentation/screens/worker_reviews_screen.dart';
 import '../../features/bookings/presentation/screens/book_slot_screen.dart';
 import '../../features/bookings/presentation/screens/my_bookings_screen.dart';
+import '../../features/bookings/presentation/screens/raise_emergency_screen.dart';
 import '../../features/bookings/presentation/screens/service_catalogue_screen.dart';
 import '../../features/bookings/presentation/screens/worker_availability_screen.dart';
 import '../../features/hiring/presentation/screens/engagements_screen.dart';
@@ -101,6 +102,11 @@ class Routes {
 
   /// Module 5.3 — the worker marks which days they can take one-off jobs.
   static const String myAvailability = '/availability';
+
+  /// Module 5.5 — the resident raises an emergency, broadcast to whoever is
+  /// free. Also the route the server puts on an offer notification, so a worker
+  /// tapping one lands on her dashboard where the card is.
+  static const String emergency = '/emergency';
 
   static String bookSlotPath(int categoryId) => '/book/$categoryId';
 
@@ -370,6 +376,20 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: Routes.myAvailability,
             builder: (_, __) => const WorkerAvailabilityScreen(),
+          ),
+          // Module 5.5. Role-split at the route rather than inside one screen:
+          // a resident is raising a request, a worker is answering one, and the
+          // two share a notification route but nothing else. A worker arriving
+          // here from a push lands on her schedule, which is where the offer
+          // cards are.
+          GoRoute(
+            path: Routes.emergency,
+            builder: (_, __) {
+              final role = ref.read(authProvider).user?.role;
+              return role == UserRole.worker
+                  ? const MyScheduleScreen()
+                  : const RaiseEmergencyScreen();
+            },
           ),
 
           // A resident's home is worker discovery — the first thing they came to

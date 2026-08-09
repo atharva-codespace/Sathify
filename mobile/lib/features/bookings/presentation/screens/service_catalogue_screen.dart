@@ -62,6 +62,13 @@ class ServiceCatalogueScreen extends ConsumerWidget {
               return CustomScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 slivers: [
+                  // Module 5.5 — the way out of this screen for somebody who
+                  // cannot use it. Choosing a category, then a date, then a
+                  // worker is three screens of decisions, and a household with
+                  // water coming through the ceiling has none to spare. It sits
+                  // above the grid because that is where somebody in a hurry
+                  // looks first.
+                  const SliverToBoxAdapter(child: AppFadeIn(child: _UrgentBanner())),
                   const SliverToBoxAdapter(
                     child: AppFadeIn(
                       child: AppSectionHeader(
@@ -104,6 +111,65 @@ class ServiceCatalogueScreen extends ConsumerWidget {
               );
             },
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The shortcut into Module 5.5's broadcast flow.
+class _UrgentBanner extends StatelessWidget {
+  const _UrgentBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.gutter,
+        AppSpacing.md,
+        AppSpacing.gutter,
+        0,
+      ),
+      child: AppCard(
+        onTap: () => context.push(Routes.emergency),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: const BoxDecoration(
+                color: AppColors.dangerSoft,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.bolt_rounded,
+                size: AppIconSize.md,
+                color: AppColors.danger,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Need someone right now?',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Sent to everyone free nearby. No need to choose.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: AppColors.textTertiary,
+              size: AppIconSize.md,
+            ),
+          ],
         ),
       ),
     );

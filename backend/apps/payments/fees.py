@@ -47,16 +47,21 @@ BOOKING_FEE_CAP_PAISE = 4_000
 
 #: Kinds that are never charged, whatever the rate is set to:
 #:
-#:   ENGAGEMENT_SALARY — a wage transfer between two people.
-#:   TIP               — the app promises all of it reaches the worker.
-#:   REPLACEMENT       — already a deduction from somebody's day.
-#:   REFUND            — charging a fee to undo a charge is indefensible.
+#:   ENGAGEMENT_SALARY   — a wage transfer between two people.
+#:   TIP                 — the app promises all of it reaches the worker.
+#:   REPLACEMENT         — already a deduction from somebody's day.
+#:   REFUND              — charging a fee to undo a charge is indefensible.
+#:   EMERGENCY_SURCHARGE — already the platform's own fee (Module 5.5). A
+#:                         percentage on top of it would be a fee on a fee, and
+#:                         the household would see two platform lines on one
+#:                         charge with no way to tell them apart.
 FEE_EXEMPT_KINDS = frozenset(
     {
         PaymentKind.ENGAGEMENT_SALARY,
         PaymentKind.TIP,
         PaymentKind.REPLACEMENT,
         PaymentKind.REFUND,
+        PaymentKind.EMERGENCY_SURCHARGE,
     }
 )
 

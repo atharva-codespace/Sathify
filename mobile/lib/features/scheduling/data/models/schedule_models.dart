@@ -66,6 +66,8 @@ class ScheduleItem {
     this.visitStatus = 'pending',
     this.completedAt,
     this.completionNote = '',
+    this.canMarkDone = false,
+    this.settlement = 'app',
   });
 
   final ScheduleSource source;
@@ -122,6 +124,31 @@ class ScheduleItem {
   final String visitStatus;
   final DateTime? completedAt;
   final String completionNote;
+
+  /// Whether this worker may mark this visit done right now.
+  ///
+  /// -----------------------------------------------------------------------
+  /// THE SERVER DECIDES THIS. THE APP USED TO, AND THAT WAS THE BUG.
+  /// -----------------------------------------------------------------------
+  /// The card previously worked out for itself whether to draw "Mark as done" —
+  /// from the visit date, the leave flags and whether a booking was confirmed —
+  /// while the server applied a different rule when the request arrived. Two
+  /// rules that were never going to stay in step, and they did not: the button
+  /// appeared on visits the server would refuse and was hidden on visits it
+  /// would have accepted, which is how a maid ended up with no way to close out
+  /// an emergency job at all.
+  ///
+  /// It is now one rule, computed where the refusal is also decided
+  /// (`Booking.can_be_completed`), and this field is that answer. Do not
+  /// re-derive it here — that is precisely the mistake being undone.
+  final bool canMarkDone;
+
+  /// `app` or `cash`. An emergency job's fee is paid hand to hand, so the card
+  /// must not tell her the household is about to be asked for money.
+  final String settlement;
+
+  /// Paid directly in cash, outside the app.
+  bool get isCashSettled => settlement == 'cash';
 
   /// The worker has marked the day's work done.
   bool get isComplete => visitStatus == 'complete' || completedAt != null;
@@ -188,6 +215,8 @@ class ScheduleItem {
         visitStatus: json['visit_status'] as String? ?? 'pending',
         completedAt: DateTime.tryParse(json['completed_at'] as String? ?? ''),
         completionNote: json['completion_note'] as String? ?? '',
+        canMarkDone: json['can_mark_done'] as bool? ?? false,
+        settlement: json['settlement'] as String? ?? 'app',
       );
 }
 

@@ -28,10 +28,20 @@ from .models import (
 class PaymentSerializer(serializers.ModelSerializer):
     """One ledger row, as both parties see it (Module 8.2)."""
 
-    worker_name = serializers.CharField(source="worker.user.get_full_name", read_only=True)
+    # A method field rather than `source="worker.user.get_full_name"`: the
+    # emergency surcharge (Module 5.5) is owed to the platform and has no
+    # worker, and a dotted source over a null FK is dropped from the payload
+    # entirely, which reads to a client as "the server forgot" rather than as
+    # "there is nobody".
+    worker_name = serializers.SerializerMethodField()
     resident_name = serializers.CharField(
         source="resident.user.get_full_name", read_only=True
     )
+
+    def get_worker_name(self, obj) -> str:
+        if obj.worker_id is None:
+            return "Sathify" if obj.is_platform_charge else ""
+        return obj.worker.user.get_full_name()
     flat_label = serializers.CharField(source="resident.flat.__str__", read_only=True)
     kind_display = serializers.CharField(source="get_kind_display", read_only=True)
 

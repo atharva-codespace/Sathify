@@ -222,6 +222,12 @@ def check_conflict(
             and item.source == "booking"
             and item.source_id == exclude_booking_id
         )
+        # A visit that is already finished is not a reason to refuse new work.
+        # The day schedule carries completed visits so the worker can still see
+        # them (and the gate can still let her out); they are history, not a
+        # commitment, and treating them as a clash would make a productive
+        # morning into a reason nobody can book her that afternoon.
+        and not item.is_complete
         and item.start_minutes < end
         and start < item.end_minutes
     ]
@@ -897,6 +903,10 @@ def _settle_booking_status(booking) -> None:
     :func:`mark_task_complete` is idempotent by design, and the two rows can
     legitimately be settled by two different routes (here, or the resident
     closing it out from the booking screen).
+
+    ``complete_booking`` decides whether the move is allowed — it owns
+    ``Booking.can_be_completed``, and duplicating that test here is how the two
+    came to disagree about emergency bookings in the first place.
     """
     from apps.bookings.models import BookingStatus
     from apps.bookings.services import complete_booking

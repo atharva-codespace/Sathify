@@ -174,4 +174,89 @@ class BookingRepository {
         as Map<String, dynamic>;
     return Booking.fromJson(response['booking'] as Map<String, dynamic>);
   }
+
+  // --- 5.5 Emergency broadcast ----------------------------------------------
+
+  /// What the emergency fee would be for a given service date.
+  ///
+  /// Always fetched and shown before raising a request, for the same reason the
+  /// cancellation quote is: a charge discovered afterwards is the kind of
+  /// surprise that costs an app its users.
+  Future<SurchargeQuote> fetchSurchargeQuote({DateTime? forDate}) async {
+    final response = await _client.get(
+      ApiEndpoints.emergencyQuote,
+      query: forDate == null ? null : {'date': formatWireDate(forDate)},
+    ) as Map<String, dynamic>;
+
+    return SurchargeQuote.fromJson(response);
+  }
+
+  /// Raises a request and opens the surcharge that unlocks it.
+  ///
+  /// Returns the booking and the **payment id** the caller must take through
+  /// Razorpay checkout. Nothing reaches a worker until that settles — the
+  /// server has no other route out of `payment_pending`, so this is enforced
+  /// rather than merely intended.
+  ///
+  /// No worker is chosen, and none can be: the point of this flow is that the
+  /// request goes to everybody who could take it.
+  Future<({Booking booking, String paymentId})> raiseEmergency({
+    required int categoryId,
+    DateTime? scheduledDate,
+    String? startTime,
+    int? durationMinutes,
+    int? quotedPrice,
+    String notes = '',
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.raiseEmergency,
+      data: {
+        'category': categoryId,
+        // Omitted means "now", which is what an emergency usually means. Every
+        // field the resident does not have to fill in is a field they are not
+        // filling in one-handed while something is going wrong.
+        if (scheduledDate != null) 'scheduled_date': formatWireDate(scheduledDate),
+        if (startTime != null) 'start_time': startTime,
+        if (durationMinutes != null) 'expected_duration_minutes': durationMinutes,
+        if (quotedPrice != null) 'quoted_price': quotedPrice,
+        if (notes.isNotEmpty) 'notes': notes,
+      },
+    ) as Map<String, dynamic>;
+
+    return (
+      booking: Booking.fromJson(response['booking'] as Map<String, dynamic>),
+      paymentId: (response['payment'] as Map<String, dynamic>)['id'] as String,
+    );
+  }
+
+  /// One poll of the live state, for whichever side is signed in.
+  Future<EmergencyLiveState> fetchEmergencyLive() async {
+    final response =
+        await _client.get(ApiEndpoints.emergencyLive) as Map<String, dynamic>;
+    return EmergencyLiveState.fromJson(response);
+  }
+
+  /// Requests currently offered to the signed-in worker.
+  Future<List<EmergencyOffer>> fetchEmergencyOffers() async {
+    final response = await _client.get(ApiEndpoints.emergencyOffers) as List;
+    return response
+        .map((row) => EmergencyOffer.fromJson(row as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Claims a request. First worker through wins.
+  ///
+  /// Losing is a 409 with code `offer_gone`, not an error the worker caused —
+  /// callers should say "someone else got there first" rather than showing a
+  /// failure message.
+  Future<Booking> acceptEmergency(int bookingId) async {
+    final response = await _client.post(ApiEndpoints.acceptEmergency(bookingId))
+        as Map<String, dynamic>;
+    return Booking.fromJson(response['booking'] as Map<String, dynamic>);
+  }
+
+  /// Passes on a request. Removes it from this worker's dashboard only — it
+  /// stays live for everybody else.
+  Future<void> declineEmergency(int bookingId) =>
+      _client.post(ApiEndpoints.declineEmergency(bookingId));
 }

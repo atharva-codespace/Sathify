@@ -373,6 +373,20 @@ class CreateBookingPaymentView(APIView):
                 status.HTTP_409_CONFLICT,
             )
 
+        # Module 5.5 — an emergency worker is paid in cash, hand to hand. The
+        # app collected the platform's surcharge and nothing else, so opening a
+        # Razorpay order here would charge the household a second time for money
+        # they are about to hand over in notes. Refused on the server rather than
+        # merely hidden in the client: a stale app build, a retried request or a
+        # tapped-twice button must not be able to produce that charge.
+        if booking.is_emergency:
+            return _error(
+                "settled_in_cash",
+                "This emergency job is paid directly to the worker in cash. "
+                "Sathify does not collect it.",
+                status.HTTP_409_CONFLICT,
+            )
+
         # Idempotent on the booking: nothing stops the app from calling this
         # twice — a resident re-opening the booking, a retried request on a
         # poor connection — and there is no other constraint stopping two

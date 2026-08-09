@@ -7,7 +7,7 @@ from rest_framework import serializers
 from apps.hiring.serializers import WorkerSearchResultSerializer
 from apps.workers.serializers import ServiceTypeSerializer
 
-from .models import Booking, DayAvailability, ServiceCategory
+from .models import Booking, BookingOffer, DayAvailability, ServiceCategory
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
@@ -73,9 +73,13 @@ class MatchedWorkerSerializer(WorkerSearchResultSerializer):
 class BookingSerializer(serializers.ModelSerializer):
     """Read projection, for both sides of a booking."""
 
-    worker_name = serializers.CharField(source="worker.user.get_full_name", read_only=True)
-    worker_photo = serializers.ImageField(source="worker.photo", read_only=True)
-    worker_phone = serializers.CharField(source="worker.user.phone_number", read_only=True)
+    # Worker fields are method fields because an emergency booking has no worker
+    # until somebody claims it (Module 5.5). A dotted source over a null FK is
+    # silently dropped from the payload, which leaves a client unable to tell
+    # "nobody yet" from "the server did not send it".
+    worker_name = serializers.SerializerMethodField()
+    worker_photo = serializers.SerializerMethodField()
+    worker_phone = serializers.SerializerMethodField()
     resident_name = serializers.CharField(source="resident.user.get_full_name", read_only=True)
     resident_flat = serializers.CharField(source="resident.flat.__str__", read_only=True)
     category = ServiceCategorySerializer(read_only=True)
@@ -84,9 +88,47 @@ class BookingSerializer(serializers.ModelSerializer):
     status = serializers.CharField(source="effective_status", read_only=True)
     is_actionable = serializers.BooleanField(read_only=True)
     can_be_cancelled = serializers.BooleanField(read_only=True)
+
+    # Module 6.6 — whether "Mark as done" would be accepted right now.
+    #
+    # Sent rather than re-derived on the client. The app used to decide this for
+    # itself from the visit date, which disagreed with the server's rule and
+    # produced both halves of the emergency-booking bug: a button that was
+    # offered when the server would refuse it, and hidden when the server would
+    # have allowed it. There is one rule, it lives on the model, and this is it.
+    can_mark_done = serializers.BooleanField(
+        source="can_be_completed", read_only=True
+    )
+    is_emergency = serializers.BooleanField(read_only=True)
+    seconds_left_to_claim = serializers.IntegerField(read_only=True)
+
     end_time = serializers.TimeField(read_only=True)
     scheduled_start = serializers.DateTimeField(read_only=True)
     is_paid = serializers.SerializerMethodField()
+    settlement = serializers.SerializerMethodField()
+
+    def get_worker_name(self, obj) -> str:
+        return obj.worker.user.get_full_name() if obj.worker_id else ""
+
+    def get_worker_photo(self, obj) -> str:
+        if not obj.worker_id or not obj.worker.photo:
+            return ""
+        request = self.context.get("request")
+        url = obj.worker.photo.url
+        return request.build_absolute_uri(url) if request is not None else url
+
+    def get_worker_phone(self, obj) -> str:
+        return obj.worker.user.phone_number if obj.worker_id else ""
+
+    def get_settlement(self, obj) -> str:
+        """How the worker's fee is paid: ``cash`` or ``app``.
+
+        Stated on every booking rather than inferred by the client from the
+        category, because getting it wrong in either direction is a payment bug:
+        an app charge on a cash job double-charges the household, and a cash
+        label on an app job leaves the worker unpaid.
+        """
+        return "cash" if obj.is_emergency else "app"
 
     def get_is_paid(self, obj) -> bool:
         """Whether a settled payment exists for this booking.
@@ -121,6 +163,13 @@ class BookingSerializer(serializers.ModelSerializer):
             "status",
             "is_actionable",
             "can_be_cancelled",
+            "can_mark_done",
+            "is_emergency",
+            "settlement",
+            "emergency_surcharge_paise",
+            "broadcast_at",
+            "offer_expires_at",
+            "seconds_left_to_claim",
             "is_paid",
             "confirmed_at",
             "declined_at",
@@ -244,6 +293,89 @@ class CancellationQuoteSerializer(serializers.Serializer):
     )
     rationale = serializers.CharField(read_only=True)
     is_free = serializers.BooleanField(read_only=True)
+
+
+# ---------------------------------------------------------------------------
+# 5.5 Emergency broadcast
+# ---------------------------------------------------------------------------
+
+
+class EmergencyRequestSerializer(serializers.Serializer):
+    """What a resident sends to raise an emergency.
+
+    Notably absent: ``worker``. That is the whole point of the flow — the
+    resident is not choosing anybody, they are asking whoever is free. A client
+    that sent one would be describing the directed flow, which already has its
+    own endpoint.
+    """
+
+    category = serializers.PrimaryKeyRelatedField(
+        queryset=ServiceCategory.objects.filter(is_active=True)
+    )
+    scheduled_date = serializers.DateField(required=False)
+    start_time = serializers.TimeField(required=False)
+    expected_duration_minutes = serializers.IntegerField(
+        required=False, min_value=15, max_value=720
+    )
+    quoted_price = serializers.IntegerField(required=False, min_value=1)
+    notes = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, default=""
+    )
+
+    def validate_category(self, category):
+        if not category.bypasses_notice_period:
+            raise serializers.ValidationError(
+                "That service is not an emergency category."
+            )
+        return category
+
+
+class BookingOfferSerializer(serializers.ModelSerializer):
+    """One emergency request as it appears on a worker's dashboard.
+
+    Flattened deliberately. This is the payload a poll returns every few seconds
+    while a request is live, so it carries what the card draws and nothing else
+    — no nested category object, no resident profile.
+    """
+
+    booking_id = serializers.IntegerField(source="booking.pk", read_only=True)
+    category_name = serializers.CharField(source="booking.category.name", read_only=True)
+    category_icon = serializers.CharField(source="booking.category.icon", read_only=True)
+    flat_label = serializers.CharField(source="booking.resident.flat.__str__", read_only=True)
+    scheduled_date = serializers.DateField(source="booking.scheduled_date", read_only=True)
+    start_time = serializers.TimeField(source="booking.start_time", read_only=True)
+    duration_minutes = serializers.IntegerField(
+        source="booking.expected_duration_minutes", read_only=True
+    )
+    quoted_price = serializers.IntegerField(source="booking.quoted_price", read_only=True)
+    notes = serializers.CharField(source="booking.notes", read_only=True)
+    booking_status = serializers.CharField(source="booking.effective_status", read_only=True)
+    expires_at = serializers.DateTimeField(source="booking.offer_expires_at", read_only=True)
+    seconds_left = serializers.IntegerField(
+        source="booking.seconds_left_to_claim", read_only=True
+    )
+
+    class Meta:
+        model = BookingOffer
+        fields = [
+            "id",
+            "booking_id",
+            "state",
+            "rank",
+            "responded_at",
+            "category_name",
+            "category_icon",
+            "flat_label",
+            "scheduled_date",
+            "start_time",
+            "duration_minutes",
+            "quoted_price",
+            "notes",
+            "booking_status",
+            "expires_at",
+            "seconds_left",
+        ]
+        read_only_fields = fields
 
 
 class MatchQuerySerializer(serializers.Serializer):
