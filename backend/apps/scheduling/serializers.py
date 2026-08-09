@@ -43,6 +43,10 @@ class ScheduleItemSerializer(serializers.Serializer):
     is_recurring = serializers.BooleanField(read_only=True)
     is_confirmed = serializers.BooleanField(read_only=True)
 
+    #: Whether Accept/Decline should be offered on this card right now. The
+    #: server's answer, for the same reason ``can_mark_done`` is.
+    can_respond = serializers.BooleanField(read_only=True)
+
     expected_arrival = serializers.TimeField(read_only=True, allow_null=True)
     grace_minutes = serializers.IntegerField(read_only=True)
     task_notes = serializers.CharField(read_only=True)

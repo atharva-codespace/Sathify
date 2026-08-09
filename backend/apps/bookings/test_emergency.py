@@ -222,6 +222,213 @@ def test_regression_a_future_dated_booking_still_cannot_be_marked_done(
     assert response.data["error"]["code"] == "booking_not_actionable"
 
 
+def _directed_emergency(resident, society, category, *, minutes_from_now: int):
+    """An emergency booked the *ordinary* way: one named worker, status PENDING.
+
+    Still reachable — a resident can pick the emergency category out of the
+    catalogue and choose somebody — so it has to work, and it is the shape that
+    was reported broken on the worker's dashboard.
+    """
+    moment = timezone.localtime() + dt.timedelta(minutes=minutes_from_now)
+    return Booking.objects.create(
+        society=society,
+        resident=resident,
+        worker=None,
+        category=category,
+        scheduled_date=moment.date(),
+        start_time=moment.time().replace(microsecond=0),
+        expected_duration_minutes=60,
+        quoted_price=600,
+        notes="come fast",
+        status=BookingStatus.PENDING,
+    )
+
+
+class TestAnsweringFromTheDashboard:
+    """The reported bug: "Awaiting your confirmation", and nothing to tap."""
+
+    @pytest.fixture
+    def pending(self, resident, society, emergency_category, maids):
+        booking = _directed_emergency(
+            resident, society, emergency_category, minutes_from_now=45
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+        return booking
+
+    def test_the_card_carries_the_accept_control(
+        self, authenticated_client, pending, maids
+    ):
+        """Without ``can_respond`` the dashboard has no way to draw a button,
+        which is exactly what it was doing: a warning flag and no action."""
+        response = authenticated_client(maids[0].user).get(
+            reverse("v1:scheduling:my-today")
+        )
+
+        card = next(
+            row for row in response.data["results"] if row["source"] == "booking"
+        )
+        assert card["can_respond"] is True
+        assert card["is_confirmed"] is False
+        assert card["can_mark_done"] is False
+
+    def test_an_unanswered_request_does_not_claim_to_be_in_progress(
+        self, authenticated_client, pending, maids, society
+    ):
+        """She was at the gate for a different job. Attendance is logged per
+        worker per day, so it used to leak onto every visit that day — including
+        one she had not accepted, producing a card that read "Awaiting your
+        confirmation" and "In progress" at once."""
+        from apps.attendance.models import AttendanceEvent, Decision, Direction
+
+        AttendanceEvent.objects.create(
+            society=society,
+            worker=maids[0],
+            direction=Direction.ENTRY,
+            decision=Decision.ALLOWED,
+            occurred_at=timezone.now() - dt.timedelta(hours=2),
+        )
+
+        response = authenticated_client(maids[0].user).get(
+            reverse("v1:scheduling:my-today")
+        )
+        card = next(
+            row for row in response.data["results"] if row["source"] == "booking"
+        )
+
+        assert card["visit_status"] == "pending"
+
+    def test_accepting_from_the_dashboard_confirms_it(
+        self, authenticated_client, pending, maids
+    ):
+        client = authenticated_client(maids[0].user)
+
+        response = client.post(
+            reverse("v1:bookings:booking-respond", args=[pending.pk]),
+            {"confirm": True},
+            format="json",
+        )
+
+        assert response.status_code == 200
+        pending.refresh_from_db()
+        assert pending.status == BookingStatus.CONFIRMED
+
+        # And the card immediately offers the next action rather than nothing.
+        card = next(
+            row
+            for row in client.get(reverse("v1:scheduling:my-today")).data["results"]
+            if row["source"] == "booking"
+        )
+        assert card["can_respond"] is False
+        assert card["can_mark_done"] is True
+
+    def test_an_emergency_can_still_be_accepted_just_after_its_start_time(
+        self, authenticated_client, resident, society, emergency_category, maids
+    ):
+        """"Come fast" at 15:00, opened at 15:05.
+
+        The ordinary rule — a job that has begun can no longer be confirmed —
+        is right for a booking agreed days ahead and wrong for this one, where
+        the start time is a guess at when somebody might arrive. Without the
+        grace the request was answerable for only the minutes between being
+        raised and its nominal start.
+        """
+        booking = _directed_emergency(
+            resident, society, emergency_category, minutes_from_now=-5
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+
+        response = authenticated_client(maids[0].user).post(
+            reverse("v1:bookings:booking-respond", args=[booking.pk]),
+            {"confirm": True},
+            format="json",
+        )
+
+        assert response.status_code == 200, response.data
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.CONFIRMED
+
+    def test_the_expiry_sweep_honours_the_same_grace(
+        self, authenticated_client, resident, society, emergency_category, maids
+    ):
+        """The sweep and the button have to agree.
+
+        The sweep was the stricter of the two, so a worker looking at a live
+        Accept button would tap it a moment after the start time and be told the
+        booking had expired — because a read somewhere else had already moved it
+        while she was reading the card.
+        """
+        booking = _directed_emergency(
+            resident, society, emergency_category, minutes_from_now=-5
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+
+        # Any booking list read runs the sweep.
+        authenticated_client(maids[0].user).get(reverse("v1:bookings:booking-list"))
+
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.PENDING
+        assert booking.is_actionable
+
+    def test_the_grace_does_run_out(
+        self, authenticated_client, resident, society, emergency_category, maids
+    ):
+        """An hour later nobody should still believe somebody might turn up."""
+        booking = _directed_emergency(
+            resident, society, emergency_category, minutes_from_now=-90
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+
+        authenticated_client(maids[0].user).get(reverse("v1:bookings:booking-list"))
+
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.EXPIRED
+
+    def test_an_ordinary_booking_gets_no_grace(
+        self, authenticated_client, resident, society, maids
+    ):
+        """The relaxation is emergency-only, deliberately. A household with a
+        deep clean booked for Tuesday needs to know before Tuesday."""
+        booking = _directed_emergency(
+            resident,
+            society,
+            ServiceCategory.objects.get(slug="deep-cleaning"),
+            minutes_from_now=-5,
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+
+        authenticated_client(maids[0].user).get(reverse("v1:bookings:booking-list"))
+
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.EXPIRED
+
+    def test_a_lapsed_request_stops_offering_the_button(
+        self, authenticated_client, resident, society, emergency_category, maids
+    ):
+        """The other half of the fix. A card that keeps saying "awaiting your
+        confirmation" with a button that always fails is no better than one with
+        no button at all."""
+        booking = _directed_emergency(
+            resident, society, emergency_category, minutes_from_now=-90
+        )
+        booking.worker = maids[0]
+        booking.save(update_fields=["worker"])
+
+        response = authenticated_client(maids[0].user).get(
+            reverse("v1:scheduling:my-today")
+        )
+        cards = [row for row in response.data["results"] if row["source"] == "booking"]
+
+        # Swept to EXPIRED by the schedule read, so it leaves the day entirely.
+        # Whichever way it goes, what must never happen is an offered control
+        # that the server would refuse.
+        assert all(not card["can_respond"] for card in cards)
+
+
 # ---------------------------------------------------------------------------
 # The surcharge — payment A
 # ---------------------------------------------------------------------------

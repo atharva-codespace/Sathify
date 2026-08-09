@@ -60,7 +60,7 @@ DEFAULT_NOTICE_HOURS = 12
 #: Days of lead time → surcharge in whole rupees. Any lead time not listed is
 #: not an emergency in any meaningful sense and is charged nothing.
 EMERGENCY_SURCHARGE_RUPEES: dict[int, int] = {
-    0: 100,  # raised on the service day itself
+    0: 1,  # raised on the service day itself
     1: 50,   # raised the day before
 }
 

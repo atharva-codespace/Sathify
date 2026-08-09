@@ -7,6 +7,7 @@ import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
+import '../../../bookings/presentation/providers/booking_provider.dart';
 import '../../../bookings/presentation/widgets/emergency_offer_card.dart';
 import '../../../bookings/presentation/widgets/emergency_request_strip.dart';
 import '../../../notifications/presentation/widgets/notification_bell.dart';
@@ -441,6 +442,76 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
     }
   }
 
+  /// Module 5.4 — the worker answers a one-day request from her own dashboard.
+  ///
+  /// -----------------------------------------------------------------------
+  /// WHY THIS LIVES HERE AND NOT ONLY ON THE BOOKINGS SCREEN
+  /// -----------------------------------------------------------------------
+  /// Accept and Decline existed only on "One-day jobs", three taps into the
+  /// overflow menu. This screen — the worker's home — showed the same request
+  /// with the words "Awaiting your confirmation" on it and no way whatsoever to
+  /// confirm it: no buttons, and the card was not even tappable, because its
+  /// only tap targets are the leave detail and the resident's timing sheet.
+  ///
+  /// So the app told her, on the first screen she sees, that something needed
+  /// her answer, and then gave her nowhere to answer it. That is bad for any
+  /// booking and unusable for an emergency, where the entire value of the
+  /// request is that it is answered in the next few minutes.
+  Future<void> _respond({required bool accept}) async {
+    final messenger = ScaffoldMessenger.of(context);
+
+    final note = accept
+        ? ''
+        : await showDialog<String>(
+            context: context,
+            builder: (_) => const _NoteDialog(
+              title: 'Decline this job?',
+              hint: 'Optional — e.g. already committed that day',
+              confirmLabel: 'Decline',
+            ),
+          );
+    // Only a cancelled *dialog* means "changed my mind". Accepting never opens
+    // one, so an empty note there is a real answer rather than an abandonment.
+    if (!accept && note == null) return;
+
+    setState(() => _isBusy = true);
+
+    try {
+      final bookings = ref.read(bookingRepositoryProvider);
+      if (accept) {
+        await bookings.confirmBooking(item.sourceId);
+      } else {
+        await bookings.declineBooking(item.sourceId, note: note ?? '');
+      }
+      if (!mounted) return;
+      // Both lists move: the schedule redraws the card, and the bookings screen
+      // is showing the same request from the other side.
+      invalidateSchedule(ref);
+      invalidateBookings(ref);
+      showAppSnackBarOn(
+        messenger,
+        accept ? 'Accepted. The household has been told.' : 'Declined.',
+        tone: accept ? AppTone.success : AppTone.info,
+      );
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      // Most often: the request lapsed, or the household cancelled, while the
+      // card was on screen. Refreshing is what makes the card tell the truth
+      // again, so it happens on the failure path too.
+      invalidateSchedule(ref);
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
+    } finally {
+      if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  /// Whether to offer Accept/Decline on this card.
+  ///
+  /// The role check is the client's own concern — a resident must never be
+  /// offered a control that answers on the worker's behalf. The deadline is the
+  /// server's, and is read from it rather than re-derived here.
+  bool get _canRespond => isWorker && item.canRespond;
+
   /// Whether to offer "Mark as done" on this card.
   ///
   /// -----------------------------------------------------------------------
@@ -510,10 +581,24 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
                 ),
                 if (item.needsResponse) ...[
                   const SizedBox(height: AppSpacing.xs),
-                  const _Flag(
-                    icon: Icons.hourglass_bottom,
-                    label: 'Awaiting your confirmation',
-                    colour: AppColors.warning,
+                  // Two different facts, and they used to share one label. A
+                  // request that can still be answered is a call to action; one
+                  // whose deadline has passed is a dead row, and telling
+                  // somebody it is "awaiting your confirmation" when nothing
+                  // will accept that confirmation is how this screen came to be
+                  // reported as broken.
+                  _Flag(
+                    icon: item.responseLapsed
+                        ? Icons.timer_off_outlined
+                        : Icons.hourglass_bottom,
+                    label: item.responseLapsed
+                        ? 'No longer available'
+                        : isWorker
+                            ? 'Awaiting your answer'
+                            : 'Awaiting their confirmation',
+                    colour: item.responseLapsed
+                        ? AppColors.textTertiary
+                        : AppColors.warning,
                   ),
                 ],
                 // Module 6.5 — the visit stays listed and says what happened to
@@ -582,7 +667,33 @@ class _ScheduleCardState extends ConsumerState<_ScheduleCard> {
                     colour: AppColors.info,
                   ),
                 ],
-                if (_canMarkDone) ...[
+                // Answering comes before finishing: a request she has not
+                // accepted cannot be one she has completed, so the two are
+                // mutually exclusive and the answer is the more urgent of them.
+                if (_canRespond) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: AppButton.secondary(
+                          label: 'Decline',
+                          icon: Icons.close_rounded,
+                          onPressed: _isBusy ? null : () => _respond(accept: false),
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        flex: 2,
+                        child: AppButton(
+                          label: 'Accept',
+                          icon: Icons.check_rounded,
+                          isLoading: _isBusy,
+                          onPressed: () => _respond(accept: true),
+                        ),
+                      ),
+                    ],
+                  ),
+                ] else if (_canMarkDone) ...[
                   const SizedBox(height: AppSpacing.sm),
                   AppButton.secondary(
                     label: 'Mark as done',

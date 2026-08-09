@@ -260,6 +260,29 @@ EMERGENCY_OPEN_STATUSES = frozenset(
     {BookingStatus.PAYMENT_PENDING, BookingStatus.BROADCAST}
 )
 
+#: How long past its start time an emergency booking may still be accepted.
+#:
+#: -----------------------------------------------------------------------------
+#: WHY AN EMERGENCY GETS A GRACE WINDOW AND AN ORDINARY BOOKING DOES NOT
+#: -----------------------------------------------------------------------------
+#: An ordinary booking is agreed days ahead, so "you cannot confirm a job that
+#: has already begun" is a reasonable rule: the household needs to know before
+#: the day whether anybody is coming.
+#:
+#: An emergency is the opposite case. It is raised minutes before it is wanted,
+#: the resident types "come fast", and the start time on the row is a guess at
+#: when somebody might get there rather than an appointment. Applying the
+#: ordinary rule meant the request was answerable for only the few minutes
+#: between being raised and its nominal start — after which the lazy expiry
+#: sweep quietly moved it to EXPIRED while it was still sitting unanswered on a
+#: worker's screen. She would tap Accept and be told the booking no longer
+#: existed, for a job the household was still waiting on.
+#:
+#: An hour is long enough to cover a worker who was mid-visit elsewhere, and
+#: short enough that a household is not left believing somebody might still turn
+#: up at midnight.
+EMERGENCY_RESPONSE_GRACE = dt.timedelta(minutes=60)
+
 
 class CancelledBy(models.TextChoices):
     RESIDENT = "resident", _("Resident")
@@ -277,18 +300,47 @@ class BookingQuerySet(models.QuerySet):
         )
 
     def stale(self):
-        """Still pending although the start time has passed.
+        """Still pending although its answering deadline has passed.
 
         Expired in fact, whether or not the row has been swept yet — see
         :meth:`expire_stale`.
+
+        Emergency categories get :data:`EMERGENCY_RESPONSE_GRACE` past their
+        start time before they count as stale, and that has to be expressed
+        *here* as well as on :attr:`Booking.is_actionable`. The two were the same
+        rule in two places, and the sweep was the stricter of them: a worker
+        looking at a live "Accept" button would tap it a moment after the start
+        time and be told the booking had expired, because this query had already
+        moved it while she was reading the card.
         """
         now = timezone.now()
-        return self.filter(
-            status=BookingStatus.PENDING,
-            scheduled_date__lte=timezone.localdate(now),
-        ).filter(
-            models.Q(scheduled_date__lt=timezone.localdate(now))
-            | models.Q(start_time__lte=now.astimezone(timezone.get_default_timezone()).time())
+        local = timezone.get_default_timezone()
+        today = timezone.localdate(now)
+        now_local = now.astimezone(local)
+        grace_cutoff = now_local - EMERGENCY_RESPONSE_GRACE
+
+        # Any earlier day is stale outright, whatever the category: a request for
+        # yesterday is not answerable however urgent it was.
+        past_day = models.Q(scheduled_date__lt=today)
+
+        ordinary_today = models.Q(
+            scheduled_date=today,
+            category__bypasses_notice_period=False,
+            start_time__lte=now_local.time(),
+        )
+
+        # Only when the grace window has not walked back over midnight. If it
+        # has, nothing scheduled today can have exhausted its grace yet.
+        emergency_today = models.Q(pk__in=[])
+        if grace_cutoff.date() == today:
+            emergency_today = models.Q(
+                scheduled_date=today,
+                category__bypasses_notice_period=True,
+                start_time__lte=grace_cutoff.time(),
+            )
+
+        return self.filter(status=BookingStatus.PENDING).filter(
+            past_day | ordinary_today | emergency_today
         )
 
     def expire_stale(self) -> int:
@@ -515,9 +567,24 @@ class Booking(SocietyScopedModel, TimeStampedModel):
         return timezone.now() >= self.scheduled_start
 
     @property
+    def response_deadline(self) -> dt.datetime:
+        """The last moment the worker may answer this request.
+
+        The start time for an ordinary booking; an hour later for an emergency.
+        See :data:`EMERGENCY_RESPONSE_GRACE` for why the two differ, and
+        :meth:`BookingQuerySet.stale` for the query that has to agree with this.
+        """
+        if self.is_emergency:
+            return self.scheduled_start + EMERGENCY_RESPONSE_GRACE
+        return self.scheduled_start
+
+    @property
     def is_stale(self) -> bool:
-        """Still unconfirmed although the start time has passed."""
-        return self.status == BookingStatus.PENDING and self.has_started
+        """Still unanswered although the deadline to answer has passed."""
+        return (
+            self.status == BookingStatus.PENDING
+            and timezone.now() >= self.response_deadline
+        )
 
     @property
     def effective_status(self) -> str:
@@ -540,7 +607,10 @@ class Booking(SocietyScopedModel, TimeStampedModel):
         Broadcast bookings are answered through the offer endpoints instead —
         there is no single worker for this to be asking about.
         """
-        return self.status == BookingStatus.PENDING and not self.has_started
+        return (
+            self.status == BookingStatus.PENDING
+            and timezone.now() < self.response_deadline
+        )
 
     @property
     def can_be_completed(self) -> bool:

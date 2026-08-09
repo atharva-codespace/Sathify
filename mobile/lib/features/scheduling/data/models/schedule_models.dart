@@ -54,6 +54,7 @@ class ScheduleItem {
     this.flatLabel = '',
     this.status = '',
     this.isConfirmed = true,
+    this.canRespond = false,
     this.expectedArrival,
     this.graceMinutes = 0,
     this.taskNotes = '',
@@ -90,6 +91,15 @@ class ScheduleItem {
 
   /// Bookings need the worker's confirmation; engagements are already agreed.
   final bool isConfirmed;
+
+  /// Whether the worker may accept or decline this visit right now.
+  ///
+  /// Not the same question as [needsResponse], and conflating them is what left
+  /// a maid staring at "Awaiting your confirmation" with no way to confirm: a
+  /// request whose answering deadline has passed still *needs* an answer it can
+  /// no longer be given. The server owns the deadline (`Booking.is_actionable`)
+  /// and this is its answer.
+  final bool canRespond;
 
   /// The resident's expected arrival, which may differ from [startTime] when
   /// Module 6.2 timing has been set.
@@ -188,6 +198,13 @@ class ScheduleItem {
   /// attendance.
   bool get needsResponse => !isRecurring && !isConfirmed;
 
+  /// Awaiting an answer that can no longer be given: the deadline has passed.
+  ///
+  /// Worth its own name because the card must say something different here. A
+  /// row that keeps insisting "Awaiting your confirmation" with nothing to tap
+  /// is the exact complaint this fixes.
+  bool get responseLapsed => needsResponse && !canRespond;
+
   factory ScheduleItem.fromJson(Map<String, dynamic> json) => ScheduleItem(
         source: ScheduleSource.fromWire(json['source'] as String?),
         sourceId: json['source_id'] as int? ?? 0,
@@ -203,6 +220,7 @@ class ScheduleItem {
         flatLabel: json['flat_label'] as String? ?? '',
         status: json['status'] as String? ?? '',
         isConfirmed: json['is_confirmed'] as bool? ?? true,
+        canRespond: json['can_respond'] as bool? ?? false,
         expectedArrival: json['expected_arrival'] as String?,
         graceMinutes: json['grace_minutes'] as int? ?? 0,
         taskNotes: json['task_notes'] as String? ?? '',

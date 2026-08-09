@@ -67,6 +67,16 @@ class ScheduleItem:
     #: Bookings need the worker's confirmation; engagements are already agreed.
     is_confirmed: bool = True
 
+    #: Whether this worker may still accept or decline this visit *right now*.
+    #:
+    #: Sent for the same reason ``can_mark_done`` is: the card that draws the
+    #: buttons and the endpoint that answers them must not hold separate
+    #: opinions. It is deliberately not the same thing as ``not is_confirmed`` —
+    #: a request whose answering deadline has passed is still unconfirmed, and
+    #: offering an Accept button for it produces a refusal the worker cannot act
+    #: on. See ``Booking.is_actionable``.
+    can_respond: bool = False
+
     #: The resident's expected arrival, where Module 6.2 timing overrides the
     #: engagement's own start time.
     expected_arrival: dt.time | None = None
@@ -556,6 +566,7 @@ def _booking_item(booking, progress=None, completion=None) -> ScheduleItem:
         # A pending booking is on the calendar but not yet agreed — it still
         # blocks the slot, and the worker needs to see that it needs answering.
         is_confirmed=booking.status == BookingStatus.CONFIRMED,
+        can_respond=booking.is_actionable,
         expected_arrival=booking.start_time,
         task_notes=booking.notes,
         pay_paise=pay_paise,
@@ -607,7 +618,16 @@ def _assemble(
             booking,
             _visit_progress(
                 completions.get(("booking", booking.pk, booking.scheduled_date)),
-                attendance.get((booking.worker_id, booking.scheduled_date)),
+                # Attendance is recorded per worker per *day*, not per visit —
+                # the gate knows somebody came in, not which of their three jobs
+                # they came in for. Attributing it to a booking the worker has
+                # not even accepted yet produced a card that read "Awaiting your
+                # confirmation" and "In progress" at the same time, which is not
+                # a state anybody can act on. An unanswered request has no
+                # progress to report, so it reports none.
+                attendance.get((booking.worker_id, booking.scheduled_date))
+                if booking.status != BookingStatus.PENDING
+                else None,
             ),
             completions.get(("booking", booking.pk, booking.scheduled_date)),
         )
