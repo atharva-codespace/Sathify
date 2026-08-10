@@ -21,6 +21,10 @@ __pycache__/
 *.py[cod]
 *.so
 .venv/
+# A second environment holding exactly what CI installs (dev.txt + cv.txt, no
+# prod.txt, no ml.txt), so a local run means something. `.venv/` above is an
+# everything-env and does not catch this name.
+.venv-ci/
 venv/
 env/
 *.egg-info/
