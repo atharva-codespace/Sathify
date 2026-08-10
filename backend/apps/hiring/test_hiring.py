@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.accounts.models import Role
+from apps.core.pricing import MAID_MONTHLY_RATE_INR
 from apps.hiring.models import (
     Engagement,
     EngagementStatus,
@@ -438,6 +439,49 @@ class TestSendHireRequest:
         assert response.status_code == 201
         assert HireRequest.objects.count() == 1
         assert response.data["request"]["status"] == HireRequestStatus.PENDING
+
+    def test_rate_comes_from_the_price_list_not_the_payload(
+        self, authenticated_client, resident, resident_user, worker, maid_service
+    ):
+        """Sathify quotes one rate, so a figure in the payload carries no weight.
+
+        Sent as 4500 here and stored as the platform rate. The field is
+        read-only on the serializer, so this is ignored rather than rejected —
+        an older build of the app that still posts a rate keeps working.
+        """
+        response = authenticated_client(resident_user).post(
+            reverse(self.URL),
+            hire_payload(worker, maid_service, monthly_rate=4500),
+            format="json",
+        )
+
+        assert response.status_code == 201
+        assert HireRequest.objects.get().monthly_rate == MAID_MONTHLY_RATE_INR
+
+    def test_accepted_request_carries_its_rate_onto_the_engagement(
+        self, authenticated_client, resident, resident_user, worker, worker_user,
+        maid_service,
+    ):
+        """The engagement records what was agreed, not what the file says today.
+
+        Copied from the request rather than re-read from the constant, so that
+        changing the price list never re-prices an agreement already made.
+        """
+        authenticated_client(resident_user).post(
+            reverse(self.URL), hire_payload(worker, maid_service), format="json"
+        )
+        request_row = HireRequest.objects.get()
+        request_row.monthly_rate = 4000
+        request_row.save(update_fields=["monthly_rate"])
+
+        response = authenticated_client(worker_user).post(
+            reverse("v1:hiring:request-respond", args=[request_row.pk]),
+            {"accept": True},
+            format="json",
+        )
+
+        assert response.status_code == 201
+        assert Engagement.objects.get().monthly_rate == 4000
 
     def test_non_primary_resident_is_refused(
         self, authenticated_client, resident, resident_user, worker, maid_service

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from apps.core.pricing import MAID_DAY_CATEGORY_SLUG, MAID_DAY_RATE_INR
 from apps.hiring.serializers import WorkerSearchResultSerializer
 from apps.workers.serializers import ServiceTypeSerializer
 
@@ -250,6 +251,25 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         # Fall back to the catalogue's guidance when the resident accepted it
         # as-is, so the client never has to echo values it did not change.
         attrs.setdefault("expected_duration_minutes", category.expected_duration_minutes)
+
+        if category.slug == MAID_DAY_CATEGORY_SLUG:
+            # Day-hire is priced by the platform, not agreed between the two
+            # parties, so a quote in the payload is refused outright rather than
+            # quietly overwritten — a resident who thinks they booked at their
+            # own figure should be told they did not.
+            quoted = attrs.get("quoted_price")
+            if quoted is not None and quoted != MAID_DAY_RATE_INR:
+                raise serializers.ValidationError(
+                    {
+                        "quoted_price": (
+                            f"A maid for a day is ₹{MAID_DAY_RATE_INR}. "
+                            "This price is not negotiable."
+                        )
+                    }
+                )
+            attrs["quoted_price"] = MAID_DAY_RATE_INR
+            return attrs
+
         if not attrs.get("quoted_price"):
             attrs["quoted_price"] = category.price_min
 

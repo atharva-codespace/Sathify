@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw
 
 from apps.accounts.models import Role, User
 from apps.bookings.models import ServiceCategory
+from apps.core.pricing import MAID_MONTHLY_RATE_INR
 from apps.societies.models import (
     Flat,
     Gate,
@@ -292,17 +293,20 @@ class Command(BaseCommand):
             self.stdout.write(f"  resident: {phone} -> flat {flat}")
 
     def _worker_profiles(self, users, types, admin):
+        # No per-worker rate in the spec: every helper is quoted the same
+        # platform figure, so a column of differing numbers here would be demo
+        # data that contradicts the product.
         spec = [
-            ("9800000003", ["maid", "cook"], 6, 9000, "Hindi, Marathi", (76, 175, 129)),
-            ("9800000005", ["cleaner", "nanny"], 3, 7500, "Marathi, English", (91, 134, 229)),
+            ("9800000003", ["maid", "cook"], 6, "Hindi, Marathi", (76, 175, 129)),
+            ("9800000005", ["cleaner", "nanny"], 3, "Marathi, English", (91, 134, 229)),
         ]
-        for phone, type_slugs, years, rate, languages, colour in spec:
+        for phone, type_slugs, years, languages, colour in spec:
             user = users[phone]
             profile, _ = WorkerProfile.objects.update_or_create(
                 user=user,
                 defaults={
                     "years_of_experience": years,
-                    "expected_monthly_rate": rate,
+                    "expected_monthly_rate": MAID_MONTHLY_RATE_INR,
                     "languages_spoken": languages,
                     "bio": f"{user.first_name} has {years} years of experience in this society's area.",
                     "is_available": True,

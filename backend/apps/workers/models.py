@@ -37,6 +37,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from apps.core.models import TimeStampedModel
+from apps.core.pricing import MAID_MONTHLY_RATE_INR
 
 
 def hash_aadhaar(raw_number: str) -> str:
@@ -115,7 +116,14 @@ class WorkerProfile(TimeStampedModel):
     )
 
     expected_monthly_rate = models.PositiveIntegerField(
-        null=True, blank=True, help_text=_("Indicative monthly rate in INR.")
+        default=MAID_MONTHLY_RATE_INR,
+        null=True,
+        blank=True,
+        help_text=_(
+            "The platform monthly rate, in INR. Mirrored onto the profile so "
+            "Module 4 search can sort and filter without a join; the worker "
+            "does not set it. See apps.core.pricing."
+        ),
     )
 
     # --- Availability (Module 3.1, consumed by Modules 4 and 5) -------------

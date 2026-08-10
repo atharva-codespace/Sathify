@@ -22,7 +22,6 @@ class HireRequestSheet extends ConsumerStatefulWidget {
 
 class _HireRequestSheetState extends ConsumerState<HireRequestSheet> {
   final _formKey = GlobalKey<FormState>();
-  final _rateController = TextEditingController();
   final _messageController = TextEditingController();
 
   /// Weekdays by default — the common case for domestic help.
@@ -39,17 +38,22 @@ class _HireRequestSheetState extends ConsumerState<HireRequestSheet> {
     super.initState();
     final services = widget.worker.summary.serviceTypes;
     if (services.isNotEmpty) _serviceType = services.first;
-
-    final rate = widget.worker.summary.expectedMonthlyRate;
-    if (rate != null) _rateController.text = '$rate';
   }
 
   @override
   void dispose() {
-    _rateController.dispose();
     _messageController.dispose();
     super.dispose();
   }
+
+  /// The platform rate, as the server reported it on this worker.
+  ///
+  /// Read from the profile rather than kept as a constant in the app: pricing
+  /// is the server's decision, and a copy here would keep quoting the old
+  /// figure on every phone that had not been updated. The server stamps the
+  /// rate on again when the request lands, so a stale value cannot be
+  /// submitted — it could only be *displayed*, which is what this avoids.
+  int? get _monthlyRate => widget.worker.summary.expectedMonthlyRate;
 
   String get _wireStartTime => '${_startTime.hour.toString().padLeft(2, '0')}:'
       '${_startTime.minute.toString().padLeft(2, '0')}';
@@ -82,7 +86,9 @@ class _HireRequestSheetState extends ConsumerState<HireRequestSheet> {
               daysOfWeek: _selectedDays.toList()..sort(),
               startTime: _wireStartTime,
               expectedDurationMinutes: _durationMinutes,
-              monthlyRate: int.parse(_rateController.text.trim()),
+              // Sent for completeness; the server ignores it and stamps the
+              // platform rate on itself, so this cannot underpay anybody.
+              monthlyRate: _monthlyRate ?? 0,
             ),
             message: _messageController.text.trim(),
           );
@@ -236,22 +242,40 @@ class _HireRequestSheetState extends ConsumerState<HireRequestSheet> {
                 ],
               ),
               const SizedBox(height: 20),
-              const _Label('Monthly pay (₹)'),
+              const _Label('Monthly pay'),
               const SizedBox(height: 8),
-              TextFormField(
-                controller: _rateController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.currency_rupee),
-                  hintText: 'e.g. 4000',
+              // Shown, not asked. Sathify quotes one rate for every helper, so
+              // there is nothing to type and nothing to haggle over — stating
+              // it plainly is more honest than a prefilled box that looks
+              // editable and is overruled by the server.
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.sm,
+                  vertical: AppSpacing.sm,
                 ),
-                validator: (value) {
-                  final amount = int.tryParse((value ?? '').trim());
-                  if (amount == null || amount <= 0) {
-                    return 'Enter the monthly pay.';
-                  }
-                  return null;
-                },
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceMuted,
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.currency_rupee, size: AppIconSize.md),
+                    const SizedBox(width: AppSpacing.xs),
+                    Expanded(
+                      child: Text(
+                        _monthlyRate == null
+                            ? 'Set by Sathify'
+                            : '$_monthlyRate per month',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    Text(
+                      'Fixed price',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 20),
               const _Label('Message (optional)'),
