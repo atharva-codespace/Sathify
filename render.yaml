@@ -68,3 +68,36 @@ services:
         sync: false
       - key: RAZORPAY_TEST_MODE
         value: "True"
+
+      # --- SMS: Module 1.4 OTP delivery, Module 10.2 notification fallback ---
+      # A deployed server CANNOT REGISTER ANYBODY without these. There is no
+      # terminal to print a code to, and codes are deliberately not written to
+      # the logs — an OTP in a log file is a credential handed to everyone with
+      # dashboard access. With SMS off, sign-up honestly returns 503 rather
+      # than claiming to have sent something.
+      #
+      # ENABLED and API_KEY are sync:false so the dashboard owns them and a
+      # blueprint re-sync cannot silently switch delivery off.
+      #
+      # The field names below are shaped for Fast2SMS. For MSG91 use
+      # AUTH_HEADER=authkey and TO_FIELD=mobiles. See backend/.env.example,
+      # and read the DLT note there before pointing this at your own sender id.
+      - key: SMS_ENABLED
+        sync: false
+      - key: SMS_API_KEY
+        sync: false
+      - key: SMS_ENDPOINT
+        value: https://www.fast2sms.com/dev/bulkV2
+      - key: SMS_SENDER_ID
+        value: SATHFY
+      - key: SMS_TO_FIELD
+        value: numbers
+      - key: SMS_MESSAGE_FIELD
+        value: message
+      - key: SMS_AUTH_HEADER
+        value: authorization
+      # Empty: Fast2SMS wants the bare key, and a stray "Bearer" is a 401.
+      - key: SMS_AUTH_SCHEME
+        value: ""
+      - key: SMS_EXTRA_PARAMS
+        value: '{"route":"q"}'

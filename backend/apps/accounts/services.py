@@ -79,10 +79,22 @@ class ConsoleSMSBackend(SMSBackend):
             logger.info("SMS (console backend) to %s: %s", phone_number, message)
             return
 
-        logger.warning(
+        # Outside DEBUG there is nowhere for the code to go: it is not printed,
+        # and it is not logged because an OTP in a log file is a credential.
+        # So this REPORTS FAILURE rather than returning quietly.
+        #
+        # Returning normally here would be the worse bug by far: the API would
+        # answer "code sent", the user would wait for an SMS that was never
+        # sent, and the code itself would exist nowhere in the universe. A
+        # deployment with no gateway configured cannot register anybody, and it
+        # should say so on the first attempt instead of stranding them.
+        logger.error(
             "SMS is not configured: no message was delivered to %s. "
-            "Set SMS_ENABLED and the gateway credentials, or users cannot sign up.",
+            "Set SMS_ENABLED and the gateway credentials, or nobody can sign up.",
             phone_number,
+        )
+        raise SMSDeliveryError(
+            "SMS delivery is not configured on this server."
         )
 
 

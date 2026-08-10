@@ -827,13 +827,54 @@ class TestSmsDelivery:
         assert response.data["otp_sent"] is False
         assert User.objects.filter(phone_number="9812345670").exists()
 
+    def test_an_unconfigured_production_server_admits_it_cannot_send(
+        self, api_client, settings
+    ):
+        """The console backend is not a delivery mechanism, and must not pose as one.
+
+        With DEBUG off there is nowhere for a code to go — it is not printed,
+        and it is deliberately not logged. Answering 200 here would tell the
+        user a code was sent, leave them waiting for an SMS that does not exist,
+        and put the code itself nowhere at all. The honest answer is a failure
+        on the first attempt.
+        """
+        settings.DEBUG = False
+        settings.SMS_BACKEND = ""
+        settings.SMS_SETTINGS = {"ENABLED": False, "ENDPOINT": "", "API_KEY": ""}
+
+        response = api_client.post(
+            reverse("v1:accounts:otp-request"),
+            {"phone_number": "9812345674", "purpose": OtpPurpose.REGISTRATION},
+            format="json",
+        )
+
+        assert response.status_code == 503
+        assert response.data["error"]["code"] == "sms_unavailable"
+
+    def test_registration_on_such_a_server_reports_no_code_was_sent(
+        self, api_client, society, settings
+    ):
+        """The account is still created, but the client must not promise an SMS."""
+        settings.DEBUG = False
+        settings.SMS_BACKEND = ""
+        settings.SMS_SETTINGS = {"ENABLED": False, "ENDPOINT": "", "API_KEY": ""}
+
+        response = api_client.post(
+            reverse("v1:accounts:register-resident"),
+            _register_payload(society=society.id),
+            format="json",
+        )
+
+        assert response.status_code == 201
+        assert response.data["otp_sent"] is False
+
     def test_the_console_backend_does_not_log_codes_outside_debug(
         self, settings, caplog, monkeypatch
     ):
         """An OTP in a log file is a credential handed to anyone who can read it."""
         import logging
 
-        from apps.accounts.services import ConsoleSMSBackend
+        from apps.accounts.services import ConsoleSMSBackend, SMSDeliveryError
 
         # settings.LOGGING gives the "apps" logger propagate=False, so its
         # records never reach the root handler caplog installs. Re-enabling
@@ -842,7 +883,8 @@ class TestSmsDelivery:
 
         settings.DEBUG = False
         with caplog.at_level(logging.DEBUG):
-            ConsoleSMSBackend().send("9812345673", "424242 is your Sathify code.")
+            with pytest.raises(SMSDeliveryError):
+                ConsoleSMSBackend().send("9812345673", "424242 is your Sathify code.")
 
         assert "424242" not in caplog.text
         # And it says so loudly, because nobody received that code.
@@ -866,7 +908,7 @@ class TestSmsDelivery:
 
 
 class TestOtp:
-    def test_requesting_an_otp_creates_a_hashed_code(self, api_client):
+    def test_requesting_an_otp_creates_a_hashed_code(self, api_client, otp_outbox):
         response = api_client.post(
             reverse("v1:accounts:otp-request"),
             {"phone_number": "9877777777", "purpose": OtpPurpose.REGISTRATION},
@@ -880,7 +922,7 @@ class TestOtp:
         assert not otp.code_hash.isdigit()
 
     def test_response_does_not_reveal_whether_the_number_is_registered(
-        self, api_client, resident_user
+        self, api_client, resident_user, otp_outbox
     ):
         """Otherwise this endpoint becomes a user-enumeration oracle."""
         known = api_client.post(
@@ -938,7 +980,7 @@ class TestOtp:
         )
         assert response.status_code == 400
 
-    def test_resend_cooldown_is_enforced(self, api_client):
+    def test_resend_cooldown_is_enforced(self, api_client, otp_outbox):
         payload = {"phone_number": "9877777780"}
         api_client.post(reverse("v1:accounts:otp-request"), payload, format="json")
         second = api_client.post(reverse("v1:accounts:otp-request"), payload, format="json")
