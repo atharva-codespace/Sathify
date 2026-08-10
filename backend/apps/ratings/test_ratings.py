@@ -26,6 +26,7 @@ from apps.ratings.models import (
     ReviewSentiment,
     TrustScoreLog,
 )
+from apps.ratings.services import AlreadyRated, submit_rating
 from apps.societies.models import Flat, Resident, Tower
 from apps.workers.models import ServiceType, WorkerProfile
 
@@ -60,6 +61,25 @@ def worker(worker_user, maid_service):
     )
     profile.service_types.add(maid_service)
     return profile
+
+
+@pytest.fixture
+def unapproved_admin(db, django_user_model, society):
+    """An administrator bound to a society but not yet verified.
+
+    societies/serializers.SocietyRegistrationSerializer attaches the society the
+    moment it is registered and leaves ``is_approved`` False, so this is a real
+    state an account passes through rather than an invented one.
+    """
+    return django_user_model.objects.create_user(
+        phone_number="9800000009",
+        password="test-pass-12345",
+        role=Role.SOCIETY_ADMIN,
+        society=society,
+        first_name="Unverified",
+        last_name="Admin",
+        is_approved=False,
+    )
 
 
 @pytest.fixture
@@ -101,6 +121,38 @@ RATING_URL = "v1:ratings:rating-list"
 
 
 class TestSubmitRating:
+    def test_a_duplicate_that_beats_the_check_is_a_conflict_not_a_crash(
+        self, monkeypatch, resident_user, finished_booking
+    ):
+        """Two taps that both pass the "already rated?" check.
+
+        That race is the reason the uniqueness rule is a database constraint as
+        well as a query. Before this, the loser of the race raised an
+        IntegrityError, which no part of the DRF exception handler recognises —
+        so a double tap on a slow connection reached the user as a 500 rather
+        than as the "you have already rated this" the winner's check would have
+        given them.
+        """
+        submit_rating(
+            rater=resident_user,
+            direction=RatingDirection.RESIDENT_TO_WORKER,
+            stars=5,
+            booking=finished_booking,
+        )
+        monkeypatch.setattr(
+            "apps.ratings.services._already_rated", lambda **kwargs: False
+        )
+
+        with pytest.raises(AlreadyRated):
+            submit_rating(
+                rater=resident_user,
+                direction=RatingDirection.RESIDENT_TO_WORKER,
+                stars=1,
+                booking=finished_booking,
+            )
+
+        assert Rating.objects.filter(booking=finished_booking).count() == 1
+
     def test_a_resident_rates_a_finished_engagement(
         self, authenticated_client, resident_user, finished_engagement
     ):
@@ -698,6 +750,45 @@ class TestReviewFlagging:
             reverse("v1:ratings:flag-list")
         )
         assert response.status_code == 403
+
+    def test_an_unapproved_administrator_cannot_see_the_flag_queue(
+        self, authenticated_client, unapproved_admin
+    ):
+        """The role alone is not enough — the account has to be verified.
+
+        This state is reachable, not hypothetical: registering a society binds
+        the administrator to it immediately and leaves the account unapproved
+        while the society sits PENDING. The queue holds every flagged review in
+        the society, in full, with both parties named.
+        """
+        response = authenticated_client(unapproved_admin).get(
+            reverse("v1:ratings:flag-list")
+        )
+        assert response.status_code == 403
+
+    def test_an_unapproved_administrator_cannot_resolve_a_flag(
+        self, authenticated_client, unapproved_admin, resident_user,
+        society, resident, worker,
+    ):
+        """Sharper than reading it: this decides whether a rating counts at all,
+        and moves the trust score that decides whether somebody gets hired."""
+        bookings = self._many_finished_bookings(society, resident, worker, 6)
+        client = authenticated_client(resident_user)
+        for booking in bookings:
+            client.post(
+                reverse(RATING_URL), {"booking": booking.pk, "stars": 5}, format="json"
+            )
+
+        flag = ReviewFlag.objects.filter(status=FlagStatus.OPEN).first()
+        response = authenticated_client(unapproved_admin).post(
+            reverse("v1:ratings:flag-resolve", args=[flag.pk]),
+            {"upheld": False, "note": "Looks fine to me."},
+            format="json",
+        )
+
+        assert response.status_code == 403
+        flag.refresh_from_db()
+        assert flag.status == FlagStatus.OPEN
 
     def test_a_resolution_note_is_required(
         self, authenticated_client, admin_user, resident_user, society, resident, worker

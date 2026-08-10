@@ -5,7 +5,7 @@ managing domestic workers (maids, cooks, cleaners) hired by residents of Indian
 apartment societies: verified onboarding, hiring, attendance, payments and trust
 scoring.
 
-> **Note on the SRS.** `Sathify_SRS.pdf` describes a responsive *web* application
+> **Note on the SRS.** `Sathify_SRS.docx` describes a responsive *web* application
 > (Bootstrap/Tailwind, browser compatibility, and so on). That is superseded:
 > Sathify is a **native/cross-platform mobile app** built in Flutter, backed by a
 > JSON API. Every web-specific instruction in the SRS should be read as
@@ -70,10 +70,17 @@ sathify/
 │   │   └── shared/          cross-feature widgets and models
 │   ├── android/             committed and hand-configured — do NOT regenerate
 │   └── .env.example
-├── scripts/setup.py         one-command setup for a fresh clone
+├── scripts/
+│   ├── setup.py             one-command setup for a fresh clone
+│   └── generate_app_icons.py
 ├── .github/                 CI, PR/issue templates, CODEOWNERS
 ├── CONTRIBUTING.md          how four people share this repo
 └── docs/
+    ├── free-tier-constraints.md   what "free" costs, and where it bites
+    ├── cloud-database.md          the shared Supabase database
+    ├── leave-and-termination.md   Module 4.6 notice rules
+    ├── manual-test-cases.md       scripted walkthroughs per module
+    └── monetisation.md
 ```
 
 Each Django app maps 1:1 to a Flutter feature folder and to a module in the
@@ -137,12 +144,18 @@ flutter run
 
 Demo logins, all with password `Sathify@123`:
 
-| Role | Phone |
-| --- | --- |
-| Society admin | `9800000001` |
-| Resident | `9800000002` |
-| Worker | `9800000003` |
-| Guard | `9800000004` |
+| Role | Phone | Name |
+| --- | --- | --- |
+| Society admin | `9800000001` | Anita Deshpande |
+| Resident | `9800000002` | Rohit Kulkarni |
+| Worker | `9800000003` | Sunita Pawar |
+| Guard | `9800000004` | Ramesh Jadhav |
+| Worker | `9800000005` | Meena Shinde |
+| Resident | `9800000006` | Priya Joshi |
+
+There are two residents and two workers on purpose. Anything two-sided — hiring,
+attendance, and both directions of a rating — needs a second pair to test
+against, and a single resident/worker pair hides half of it.
 
 The step-by-step equivalents are below, for when something goes wrong or you
 only want one half of the stack.
@@ -209,6 +222,24 @@ adopts any existing superuser into it. It is idempotent; `--reset` rebuilds the
 demo accounts from scratch. You can still create a superuser for the Django
 admin (it prompts for a phone number, not a username) — just run `seed_demo`
 afterwards.
+
+**`seed_rateable_jobs` for anything that rates.** `seed_demo` creates accounts,
+not work, and Module 9 only ever offers a job that has actually finished — a
+booking has to be COMPLETED and an engagement TERMINATED before either side may
+rate it. So a freshly seeded system shows an empty Rate Work screen on both
+sides, and reaching a rateable job through the API means booking, accepting,
+waiting for the date to pass, marking complete, paying, hiring, then ending, in
+that order:
+
+```bash
+python manage.py seed_rateable_jobs           # one finished booking + one ended
+                                              # engagement per resident/worker pair
+python manage.py seed_rateable_jobs --reset   # un-rate them and put the trust
+                                              # scores back, to run through again
+```
+
+Idempotent, and it only ever touches rows it created — it will not end a live
+engagement you are in the middle of testing.
 
 Run the tests:
 
@@ -306,6 +337,11 @@ antivirus scanning of Gradle's file churn is routinely the difference between a
 3-minute and a 30-minute build. Run it once, as Administrator; it discovers your
 own tool paths rather than assuming anybody else's. It is entirely optional.
 
+If a third-party scanner (McAfee, Norton, Avast…) is handling real-time
+protection, Defender is switched off and `Add-MpPreference` silently does
+nothing — the script detects that and prints the exclusions to add by hand
+instead, because only the vendor's own UI can set them.
+
 ### Push notifications (optional)
 
 The app runs without any Firebase setup. `Firebase.initializeApp()` failing is
@@ -341,6 +377,8 @@ registers a token that nothing ever pushes to.
 | Gradle fails with a Java/AGP version error | Wrong JDK. This project needs **21** — see Prerequisites. `flutter doctor -v` reports the one Flutter is using. |
 | `:app:processDebugGoogleServices` fails with `File google-services.json is missing` | You are on an older checkout. Firebase is optional, and `android/app/build.gradle.kts` now applies the Google services plugin only when that file exists — pull `main`. Not having the file is the expected state: push is simply off and the in-app notification centre carries everything. Add it only if you want push, per "Push notifications (optional)". |
 | `flutter test` fails in `test/widget_test.dart` | Someone ran `flutter create` in `mobile/`. Delete `mobile/test/widget_test.dart`, `mobile/README.md`, and `mobile/android/app/src/main/kotlin/com/sathify/sathify/`. |
+| A screen renders blank on a device although its widget tests pass | Almost always a layout failure that only happens under the app's own theme — `AppTheme` makes buttons full-width (`minimumSize: Size.fromHeight(...)` leaves the width at `double.infinity`), which breaks any parent that needs an intrinsic width. Pump screens as `MaterialApp(theme: AppTheme.light, home: …)`; a bare `MaterialApp` uses Material's defaults and hides it. Get the cause from the device: `adb logcat -d \| grep "caught a widget error"` — the **first** line is the real fault, the `RenderBox was not laid out` flood after it is cascade. |
+| Checking a screen from a photo of the phone | Use `adb exec-out screencap -p > out.png` instead. Loading skeletons are `#F0F2EF` on white and vanish in a photo, so "still loading" and "rendered nothing" look identical. |
 | First request after a break takes ~50 s | Render's free instance was asleep. Expected — see [docs/free-tier-constraints.md](docs/free-tier-constraints.md) §2. |
 | Android builds take tens of minutes on Windows | Antivirus scanning Gradle's file churn. Run `optimize-windows-build.ps1` as Administrator. |
 | Superuser logs in and sees an empty app | It has no society. Run `python manage.py seed_demo`, which adopts existing superusers into the demo society. |
@@ -364,7 +402,7 @@ promise on this page is verified continuously rather than trusted.
 You can run the same checks locally in well under a minute:
 
 ```bash
-cd backend && python manage.py makemigrations --check --dry-run && python -m pytest -m "not ml"
+cd backend && python manage.py check && python manage.py makemigrations --check --dry-run && python -m pytest -m "not ml"
 cd mobile  && flutter analyze && flutter test
 ```
 

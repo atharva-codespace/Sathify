@@ -8,6 +8,8 @@ import '../../../../core/errors/api_exception.dart';
 import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../../payments/presentation/providers/payment_provider.dart';
+import '../../../ratings/data/models/rating_models.dart';
+import '../../../ratings/presentation/widgets/rate_sheet.dart';
 import '../../data/models/booking_models.dart';
 import '../providers/booking_provider.dart';
 import 'category_icon.dart';
@@ -47,14 +49,25 @@ class _BookingCardState extends ConsumerState<BookingCard> {
 
   Booking get booking => widget.booking;
 
-  Future<void> _run(Future<void> Function() action, String message) async {
+  Future<void> _run(
+    Future<void> Function() action,
+    String message, {
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) async {
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _isBusy = true);
     try {
       await action();
       if (!mounted) return;
       invalidateBookings(ref);
-      showAppSnackBarOn(messenger, message, tone: AppTone.success);
+      showAppSnackBarOn(
+        messenger,
+        message,
+        tone: AppTone.success,
+        actionLabel: actionLabel,
+        onAction: onAction,
+      );
     } on ApiException catch (error) {
       if (!mounted) return;
       setState(() => _isBusy = false);
@@ -92,7 +105,38 @@ class _BookingCardState extends ConsumerState<BookingCard> {
         // household is asked for the fee the moment this lands, so the worker
         // knows the money is in motion rather than wondering.
         'Marked complete. ₹${booking.quotedPrice} has been requested.',
+        actionLabel: 'Rate',
+        onAction: _rate,
       );
+
+  /// Module 9.1 — offered at the moment the job ends.
+  ///
+  /// This is when somebody actually has a view on how it went. Leaving them to
+  /// find the Rate screen under Account is how a two-way rating system ends up
+  /// with no ratings in it, and the count of things left to rate is the only
+  /// other prompt they get.
+  ///
+  /// Declining it costs nothing: the booking stays in the pending list until
+  /// it is rated, so this is a shortcut rather than the only chance.
+  void _rate() {
+    // The snackbar outlives the card when the list refetches around it.
+    if (!mounted) return;
+    unawaited(
+      showRateJobSheet(
+        context,
+        ref,
+        RateableJob(
+          kind: 'booking',
+          id: booking.id,
+          title: booking.category?.name ?? 'Booking',
+          counterpartyName:
+              widget.isWorker ? booking.residentName : booking.workerName,
+          flatLabel: booking.residentFlat,
+          finishedOn: booking.scheduledDate,
+        ),
+      ),
+    );
+  }
 
   /// Opens (or resumes) the payment for a completed job, then hands off to the
   /// payments screen to collect it — that screen owns the tested checkout flow.

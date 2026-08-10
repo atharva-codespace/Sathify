@@ -33,11 +33,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Role
-from apps.accounts.permissions import (
-    IsApprovedSocietyAdmin,
-    IsEngagementParty,
-    IsSocietyAdmin,
-)
+from apps.accounts.permissions import IsApprovedSocietyAdmin, IsEngagementParty
 from apps.societies.models import Resident
 from apps.workers.models import WorkerProfile
 
@@ -417,10 +413,16 @@ class ReviewFlagListView(generics.ListAPIView):
 
     Flags are raised by heuristics, every one of which has an innocent
     explanation, so a human decides. Nothing is deleted automatically.
+
+    Approved administrators only. An administrator who registers a society is
+    bound to it immediately while their own account stays unapproved and the
+    society stays PENDING (societies/serializers.SocietyRegistrationSerializer),
+    so the role check alone would open this queue — every flagged review in the
+    society, in full, with both parties named — to somebody nobody has verified.
     """
 
     serializer_class = ReviewFlagSerializer
-    permission_classes = [IsSocietyAdmin]
+    permission_classes = [IsApprovedSocietyAdmin]
     queryset = ReviewFlag.objects.none()  # declared for schema generation
 
     def get_queryset(self):
@@ -448,9 +450,13 @@ class ResolveFlagView(APIView):
     Dismissing restores the rating to scoring and recomputes the subject's score
     with it — clearing a false positive but leaving the penalty in place would
     be the worst of both outcomes.
+
+    Approved administrators only, for the reason given on ReviewFlagListView —
+    and more sharply here, because this decides whether somebody's rating counts
+    and moves the trust score that decides whether they get hired.
     """
 
-    permission_classes = [IsSocietyAdmin]
+    permission_classes = [IsApprovedSocietyAdmin]
     serializer_class = ResolveFlagSerializer
 
     def post(self, request, pk):

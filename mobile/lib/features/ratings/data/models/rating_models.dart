@@ -95,6 +95,7 @@ class Rating {
     required this.stars,
     required this.direction,
     this.review = '',
+    this.raterId = 0,
     this.raterName = '',
     this.workerName = '',
     this.residentName = '',
@@ -109,6 +110,13 @@ class Rating {
   final int stars;
   final RatingDirection direction;
   final String review;
+
+  /// The user who wrote it. Compared against the signed-in user to tell a
+  /// rating you *gave* from one that is *about you* — both arrive in the same
+  /// list, and "Sunita rated you" and "you rated Sunita" are opposite things to
+  /// read next to the same five stars.
+  final int raterId;
+
   final String raterName;
   final String workerName;
   final String residentName;
@@ -132,6 +140,7 @@ class Rating {
         stars: json['stars'] as int? ?? 0,
         direction: RatingDirection.fromWire(json['direction'] as String?),
         review: json['review'] as String? ?? '',
+        raterId: json['rater'] as int? ?? 0,
         raterName: json['rater_name'] as String? ?? '',
         workerName: json['worker_name'] as String? ?? '',
         residentName: json['resident_name'] as String? ?? '',

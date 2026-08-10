@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Avg, Count, Q
 from django.utils import timezone
 
@@ -92,7 +92,10 @@ def rateable_engagements(user, *, direction: str):
         queryset = queryset.filter(worker__user=user)
 
     return queryset.exclude(ratings__direction=direction).select_related(
-        "worker__user", "resident__user", "resident__flat__tower"
+        # ``service_type`` is here because PendingRatingsView reads its name for
+        # every row's title; without it the list costs one extra query per
+        # engagement, on the endpoint a user hits first on a cold backend.
+        "worker__user", "resident__user", "resident__flat__tower", "service_type"
     )
 
 
@@ -108,6 +111,18 @@ def rateable_bookings(user, *, direction: str):
     return queryset.exclude(ratings__direction=direction).select_related(
         "worker__user", "resident__user", "resident__flat__tower", "category"
     )
+
+
+def _already_rated(*, direction: str, engagement, booking) -> bool:
+    """Whether this side has rated this job already.
+
+    A named function rather than an inline query so a test can suppress it and
+    exercise what happens when two taps both get past it — which is the only
+    way the database constraint underneath is ever reached.
+    """
+    return Rating.objects.filter(
+        direction=direction, engagement=engagement, booking=booking
+    ).exists()
 
 
 def _recent_context(rating: Rating) -> dict:
@@ -242,23 +257,34 @@ def submit_rating(
         if job.status != BookingStatus.COMPLETED:
             raise NotRateable("This booking has not been completed yet.")
 
-    existing = Rating.objects.filter(
-        direction=direction, engagement=engagement, booking=booking
-    ).exists()
-    if existing:
+    if _already_rated(direction=direction, engagement=engagement, booking=booking):
         raise AlreadyRated("You have already rated this job.")
 
-    rating = Rating.objects.create(
-        society=society,
-        direction=direction,
-        worker=worker,
-        resident=resident,
-        rater=rater,
-        engagement=engagement,
-        booking=booking,
-        stars=stars,
-        review=review.strip(),
-    )
+    # The check above loses a race between two taps — which is exactly why the
+    # uniqueness rule is also a database constraint (see Rating.Meta). Catching
+    # the constraint here is what turns the loser of that race into the same
+    # "you have already rated this" the checker would have given, instead of an
+    # IntegrityError escaping as a 500: nothing in the DRF exception handler
+    # knows about database errors, so it would reach the user as a crash.
+    #
+    # The savepoint matters. An IntegrityError poisons the transaction it was
+    # raised in, so the create needs its own block for the outer one to survive
+    # and roll back cleanly.
+    try:
+        with transaction.atomic():
+            rating = Rating.objects.create(
+                society=society,
+                direction=direction,
+                worker=worker,
+                resident=resident,
+                rater=rater,
+                engagement=engagement,
+                booking=booking,
+                stars=stars,
+                review=review.strip(),
+            )
+    except IntegrityError as exc:
+        raise AlreadyRated("You have already rated this job.") from exc
 
     run_sentiment(rating)
     run_detection(rating)

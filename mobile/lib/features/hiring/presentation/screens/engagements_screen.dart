@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -7,6 +9,8 @@ import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../../payments/presentation/providers/payment_provider.dart';
 import '../../../payments/presentation/widgets/pay_sheet.dart';
+import '../../../ratings/data/models/rating_models.dart';
+import '../../../ratings/presentation/widgets/rate_sheet.dart';
 import '../../data/models/hiring_models.dart';
 import '../providers/hiring_provider.dart';
 
@@ -83,20 +87,58 @@ class _EngagementCard extends ConsumerStatefulWidget {
 class _EngagementCardState extends ConsumerState<_EngagementCard> {
   bool _isBusy = false;
 
-  Future<void> _run(Future<void> Function() action, String message) async {
+  Future<void> _run(
+    Future<void> Function() action,
+    String message, {
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _isBusy = true);
     try {
       await action();
       if (!mounted) return;
       invalidateHiring(ref);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
+      showAppSnackBarOn(
+        messenger,
+        message,
+        tone: AppTone.success,
+        actionLabel: actionLabel,
+        onAction: onAction,
+      );
     } on ApiException catch (error) {
       if (!mounted) return;
       setState(() => _isBusy = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.message)));
+      showAppSnackBarOn(messenger, error.message, tone: AppTone.danger);
     }
+  }
+
+  /// Module 9.1 — offered the moment the arrangement ends.
+  ///
+  /// Only from [_terminate], not from notice: notice does not end anything for
+  /// ten more days, and the server refuses to rate an engagement that is still
+  /// running. Prompting there would offer a button that could only fail.
+  void _rate() {
+    // The snackbar outlives the card when the list refetches around it.
+    if (!mounted) return;
+    final engagement = widget.engagement;
+
+    unawaited(
+      showRateJobSheet(
+        context,
+        ref,
+        RateableJob(
+          kind: 'engagement',
+          id: engagement.id,
+          title: engagement.serviceType?.name ?? 'Regular work',
+          counterpartyName: widget.isWorker
+              ? engagement.residentName
+              : engagement.workerName,
+          flatLabel: engagement.residentFlat,
+          finishedOn: DateTime.now(),
+        ),
+      ),
+    );
   }
 
   Future<void> _pause() => _run(
@@ -288,6 +330,8 @@ class _EngagementCardState extends ConsumerState<_EngagementCard> {
           .read(hiringRepositoryProvider)
           .terminateEngagement(widget.engagement.id, reason: reason),
       'Engagement ended.',
+      actionLabel: 'Rate',
+      onAction: _rate,
     );
   }
 
