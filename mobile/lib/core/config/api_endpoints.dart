@@ -9,14 +9,31 @@ class ApiEndpoints {
   const ApiEndpoints._();
 
   // --- Module 1: Identity & Access ------------------------------------------
+  //
+  // Sign-in is phone + password. The OTP proves a phone number is real, in the
+  // two flows that need it: verifying a new account, and resetting a forgotten
+  // password. It is never a way to sign in.
+
   static const String login = '/auth/login/';
   static const String refresh = '/auth/refresh/';
   static const String logout = '/auth/logout/';
   static const String registerResident = '/auth/register/resident/';
   static const String registerWorker = '/auth/register/worker/';
   static const String me = '/auth/me/';
+
+  /// Sends a code. Body carries `purpose`: `registration` or `password_reset`.
   static const String requestOtp = '/auth/otp/request/';
+
+  /// Finishes sign-up. Returns `{access, refresh, user}`, so a new user lands
+  /// in the app without retyping the password they just chose.
   static const String verifyOtp = '/auth/otp/verify/';
+
+  /// "Forgot password": a reset code plus the new password. Also returns a
+  /// session, and revokes every other one server-side.
+  static const String resetPassword = '/auth/password/reset/';
+
+  /// Changing a password you already know, from inside the app.
+  static const String changePassword = '/auth/password/change/';
 
   // --- Module 2: Society & Resident Onboarding ------------------------------
   /// Unauthenticated — powers the society picker during registration.

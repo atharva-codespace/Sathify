@@ -263,19 +263,25 @@ class TestSessionRevocationScope:
         )
         assert response.status_code == 403
 
+    def _login(self, api_client, user, device):
+        from django.urls import reverse
+
+        return api_client.post(
+            reverse("v1:accounts:login"),
+            {
+                "phone_number": user.phone_number,
+                "password": "test-pass-12345",
+                "device": device,
+            },
+            format="json",
+        )
+
     def test_guard_login_revokes_other_guard_sessions(self, api_client, guard_user):
         """A gate terminal holds one session; two would make the entry log ambiguous."""
         DeviceSession.objects.create(user=guard_user, device_id="old-terminal")
 
-        api_client.post(
-            "/api/v1/auth/login/",
-            {
-                "phone_number": guard_user.phone_number,
-                "password": "test-pass-12345",
-                "device": {"device_id": "new-terminal"},
-            },
-            format="json",
-        )
+        response = self._login(api_client, guard_user, {"device_id": "new-terminal"})
+        assert response.status_code == 200  # or the assertions below pass vacuously
 
         assert DeviceSession.objects.get(device_id="old-terminal").is_revoked is True
         assert DeviceSession.objects.get(device_id="new-terminal").is_revoked is False
@@ -284,14 +290,7 @@ class TestSessionRevocationScope:
         """Only guards are single-session; residents legitimately use two devices."""
         DeviceSession.objects.create(user=resident_user, device_id="tablet")
 
-        api_client.post(
-            "/api/v1/auth/login/",
-            {
-                "phone_number": resident_user.phone_number,
-                "password": "test-pass-12345",
-                "device": {"device_id": "phone"},
-            },
-            format="json",
-        )
+        response = self._login(api_client, resident_user, {"device_id": "phone"})
+        assert response.status_code == 200
 
         assert DeviceSession.objects.get(device_id="tablet").is_revoked is False

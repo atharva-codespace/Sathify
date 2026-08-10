@@ -7,11 +7,48 @@ import '../../../../core/storage/token_storage.dart';
 import '../models/saved_account.dart';
 import '../models/user_model.dart';
 
+/// Why a one-time code was requested.
+///
+/// Mirrors `OtpPurpose` on the server, which scopes codes by purpose: a code
+/// issued to verify a new account is refused on the password-reset route, and
+/// vice versa. That scoping is load-bearing — a registration code can be
+/// triggered by anyone who knows a phone number — which is why this is an enum
+/// rather than a loose string a typo could silently corrupt.
+///
+/// There is no `login` purpose. Signing in uses a password.
+enum OtpPurpose {
+  /// Verifying the number given while creating an account.
+  registration('registration'),
+
+  /// Proving the phone before setting a new password ("forgot password").
+  passwordReset('password_reset');
+
+  const OtpPurpose(this.wireValue);
+
+  final String wireValue;
+}
+
+/// What creating an account returns: the new profile, and whether the
+/// verification code actually went out.
+class RegistrationResult {
+  const RegistrationResult({required this.user, required this.otpSent});
+
+  final UserModel user;
+
+  /// False when the server's send throttle bit. The account exists regardless,
+  /// so the flow continues to the code prompt either way.
+  final bool otpSent;
+}
+
 /// Every call to the Module 1 auth endpoints goes through here.
 ///
 /// Screens never touch [ApiClient] directly: keeping the HTTP shape in one
 /// place means a server-side field rename is a one-file change, and it lets
 /// tests substitute a fake repository without mocking HTTP.
+///
+/// Sign-in is [login] — phone number and password. The OTP methods serve the
+/// two flows that need to prove a phone number is real: [verifyOtp] finishes
+/// sign-up, and [resetPassword] answers "I forgot my password".
 class AuthRepository {
   AuthRepository({
     ApiClient? client,
@@ -42,6 +79,75 @@ class AuthRepository {
       },
     ) as Map<String, dynamic>;
 
+    return _persistSession(response);
+  }
+
+  /// Asks the server to text a one-time code to [phoneNumber].
+  ///
+  /// [purpose] must match the purpose the code is later redeemed under — the
+  /// server scopes codes so one issued for registration cannot be spent on a
+  /// password reset. Throws [ApiException] with code `throttled` when the
+  /// resend cooldown or the hourly ceiling is hit; `details.retry_after_seconds`
+  /// says how long to wait, which is what the resend countdown reads.
+  Future<void> requestOtp({
+    required String phoneNumber,
+    OtpPurpose purpose = OtpPurpose.registration,
+  }) =>
+      _client.post(
+        ApiEndpoints.requestOtp,
+        data: {'phone_number': phoneNumber, 'purpose': purpose.wireValue},
+      );
+
+  /// Finishes sign-up: verifies the phone number and signs the new user in.
+  ///
+  /// Only used once per account, straight after registration. Every sign-in
+  /// after this one goes through [login] with the password chosen at sign-up.
+  Future<UserModel> verifyOtp({
+    required String phoneNumber,
+    required String code,
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.verifyOtp,
+      data: {
+        'phone_number': phoneNumber,
+        'code': code,
+        'device': await _deviceInfo(),
+      },
+    ) as Map<String, dynamic>;
+
+    return _persistSession(response);
+  }
+
+  /// Sets a new password against a reset code, and signs the user in.
+  ///
+  /// The "forgot password" endpoint. No current password is asked for — the
+  /// user is here precisely because they do not have it — so the code is the
+  /// proof. Succeeding revokes every other session server-side.
+  Future<UserModel> resetPassword({
+    required String phoneNumber,
+    required String code,
+    required String newPassword,
+  }) async {
+    final response = await _client.post(
+      ApiEndpoints.resetPassword,
+      data: {
+        'phone_number': phoneNumber,
+        'code': code,
+        'new_password': newPassword,
+        'device': await _deviceInfo(),
+      },
+    ) as Map<String, dynamic>;
+
+    return _persistSession(response);
+  }
+
+  /// Stores the tokens and profile from any endpoint that opens a session.
+  ///
+  /// Shared by sign-in, sign-up verification and password reset, which return
+  /// an identical body. Keeping one implementation is what stops a flow from
+  /// quietly forgetting to save the refresh token and leaving the user signed
+  /// in until their first app restart.
+  Future<UserModel> _persistSession(Map<String, dynamic> response) async {
     await _tokenStorage.saveTokens(
       accessToken: response['access'] as String,
       refreshToken: response['refresh'] as String,
@@ -58,7 +164,10 @@ class AuthRepository {
   }
 
   /// Registers a resident. The account lands unapproved by design.
-  Future<UserModel> registerResident({
+  ///
+  /// The server sends a verification code as part of creating the account, so
+  /// the caller's next screen is the code prompt — not a sign-in form.
+  Future<RegistrationResult> registerResident({
     required String phoneNumber,
     required String password,
     required String firstName,
@@ -78,7 +187,7 @@ class AuthRepository {
 
   /// Registers a domestic worker. KYC (Module 3) follows before they are
   /// visible in search or admissible at the gate.
-  Future<UserModel> registerWorker({
+  Future<RegistrationResult> registerWorker({
     required String phoneNumber,
     required String password,
     required String firstName,
@@ -94,10 +203,18 @@ class AuthRepository {
         'society': societyId,
       });
 
-  Future<UserModel> _register(String path, Map<String, dynamic> body) async {
+  Future<RegistrationResult> _register(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
     final response =
         await _client.post(path, data: body) as Map<String, dynamic>;
-    return UserModel.fromJson(response['user'] as Map<String, dynamic>);
+    return RegistrationResult(
+      user: UserModel.fromJson(response['user'] as Map<String, dynamic>),
+      // False when the server was throttled mid-registration. The account still
+      // exists; the code prompt simply opens with resend already available.
+      otpSent: response['otp_sent'] as bool? ?? true,
+    );
   }
 
   /// Fetches the current profile from the server.
@@ -160,8 +277,9 @@ class AuthRepository {
   /// * `forget: true` is the full sign-out that existed before: it blacklists
   ///   the refresh token server-side and drops the account from the switcher.
   ///
-  /// The device keeps no *password* either way — only a rotating, revocable
-  /// token in the Keystore.
+  /// The device stores no credential either way — only a rotating, revocable
+  /// token in the Keystore. There is no password to leave behind, and a lapsed
+  /// token costs the user one SMS rather than a forgotten secret.
   Future<void> signOut({bool forget = false}) async {
     final cached = await cachedUser();
 
@@ -179,20 +297,20 @@ class AuthRepository {
     await _tokenStorage.clear();
   }
 
-  /// Resumes a previously used account without a password.
+  /// Resumes a previously used account without a new code.
   ///
   /// Spends the parked refresh token to mint a fresh pair. Throws an
   /// [ApiException] when there is no token or the server rejects it — expired,
   /// already blacklisted, or revoked because the device was reported lost. The
-  /// login screen treats that as "ask for the password" rather than as an
-  /// error, which is the only sane outcome: the account is still real, the
-  /// shortcut just expired.
+  /// login screen treats that as "send a fresh code" rather than as an error,
+  /// which is the only sane outcome: the account is still real, the shortcut
+  /// just expired.
   Future<UserModel> resumeSavedAccount(SavedAccount account) async {
     final refreshToken = await _savedAccounts.takeToken(account.userId);
     if (refreshToken == null) {
       throw const ApiException(
         code: 'quick_sign_in_unavailable',
-        message: 'Enter your password to sign in.',
+        message: 'Sign in with a code to continue.',
         statusCode: 401,
       );
     }
@@ -206,7 +324,7 @@ class AuthRepository {
     if (access == null) {
       throw const ApiException(
         code: 'quick_sign_in_unavailable',
-        message: 'Enter your password to sign in.',
+        message: 'Sign in with a code to continue.',
         statusCode: 401,
       );
     }
@@ -243,27 +361,6 @@ class AuthRepository {
       }
     }
     await _savedAccounts.remove(account.userId);
-  }
-
-  Future<void> requestOtp({
-    required String phoneNumber,
-    String purpose = 'registration',
-  }) =>
-      _client.post(
-        ApiEndpoints.requestOtp,
-        data: {'phone_number': phoneNumber, 'purpose': purpose},
-      );
-
-  Future<bool> verifyOtp({
-    required String phoneNumber,
-    required String code,
-    String purpose = 'registration',
-  }) async {
-    final response = await _client.post(
-      ApiEndpoints.verifyOtp,
-      data: {'phone_number': phoneNumber, 'code': code, 'purpose': purpose},
-    ) as Map<String, dynamic>;
-    return response['verified'] as bool? ?? false;
   }
 
   /// Identifies this installation so the server can manage device sessions.

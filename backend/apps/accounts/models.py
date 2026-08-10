@@ -45,7 +45,17 @@ phone_validator = RegexValidator(
 
 
 class UserManager(BaseUserManager):
-    """Manager keyed on phone number instead of username."""
+    """Manager keyed on phone number instead of username.
+
+    Users authenticate with a phone number and a password they choose at
+    registration. The OTP is a separate mechanism with a narrower job: proving
+    the phone number is real, once at sign-up, and re-proving it when somebody
+    has forgotten their password. It is not the credential.
+
+    ``password=None`` stores an unusable hash rather than an empty one, so an
+    account created without a password cannot be signed into at all until one is
+    set. That is the correct failure mode for a half-created account.
+    """
 
     use_in_migrations = True
 
@@ -163,6 +173,22 @@ class User(AbstractUser):
             # this society" on the administrator's approval queue.
             models.Index(fields=["society", "role", "is_approved"]),
         ]
+        constraints = [
+            # Module 1.3 — the four roles are mutually exclusive AND exhaustive.
+            #
+            # Exclusivity comes free from `role` being a single column: there is
+            # no way to hold two. Exhaustiveness does not, and that is the half
+            # worth enforcing in the database. `role` has no default, so any
+            # code path that forgets to set it — a data import, a shell script,
+            # a future serializer — would otherwise write `role=""`. Such a user
+            # is invisible to every permission class in permissions.py, which
+            # sounds safe but is not: it is an account in a state no part of the
+            # system reasons about. Failing the write is better than storing it.
+            models.CheckConstraint(
+                condition=models.Q(role__in=Role.values),
+                name="user_role_is_one_of_the_four_roles",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_full_name() or self.phone_number} ({self.get_role_display()})"
@@ -204,9 +230,20 @@ class User(AbstractUser):
 
 
 class OtpPurpose(models.TextChoices):
+    """Why a code was issued.
+
+    Only two reasons exist, and both are about proving control of a phone
+    number rather than signing in. Ordinary sign-in uses a password; issuing a
+    code for it would put a second, weaker credential path beside the first.
+
+    Codes are scoped to their purpose, so one texted to verify a new account
+    cannot be redeemed to reset that account's password. Without that scoping a
+    registration code — which a stranger can trigger for any number — would be
+    worth a password reset.
+    """
+
     REGISTRATION = "registration", _("Phone verification at registration")
-    LOGIN = "login", _("Passwordless login")
-    PASSWORD_RESET = "password_reset", _("Password reset")
+    PASSWORD_RESET = "password_reset", _("Password reset for a forgotten password")
 
 
 class OtpCodeQuerySet(models.QuerySet):
@@ -237,8 +274,15 @@ class OtpCode(models.Model):
     """
 
     CODE_LENGTH = 6
+    #: Wrong guesses allowed against one code before it is dead. Five, strictly:
+    #: at 10^6 possibilities this leaves a 1-in-200,000 chance of a blind hit.
     MAX_ATTEMPTS = 5
-    VALIDITY_MINUTES = 10
+    #: How long a code lives. Two minutes is short on purpose — it is the single
+    #: biggest lever on the window an intercepted SMS is useful in, and an OTP
+    #: that arrives is typed within seconds.
+    VALIDITY_MINUTES = 2
+    #: Resend cooldown. Half the validity window, so a user whose SMS is slow
+    #: can request exactly one replacement before the first code lapses.
     RESEND_COOLDOWN_SECONDS = 60
     MAX_SENDS_PER_HOUR = 5
 

@@ -133,6 +133,7 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
+  /// Signs in with a phone number and password.
   Future<void> login({
     required String phoneNumber,
     required String password,
@@ -155,7 +156,73 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  Future<bool> registerResident({
+  /// Asks the server to send a one-time code.
+  ///
+  /// Returns false when the request was refused — most often the resend
+  /// throttle. The caller stays on the code screen either way; a throttle is
+  /// "wait a moment", not "start again".
+  Future<bool> requestOtp({
+    required String phoneNumber,
+    OtpPurpose purpose = OtpPurpose.registration,
+  }) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _repository.requestOtp(phoneNumber: phoneNumber, purpose: purpose);
+      state = state.copyWith(isSubmitting: false);
+      return true;
+    } on ApiException catch (error) {
+      state = state.copyWith(
+        isSubmitting: false,
+        errorMessage: error.message,
+        fieldErrors: _extractFieldErrors(error),
+      );
+      return false;
+    }
+  }
+
+  /// Finishes sign-up: verifies the phone number and signs the new user in.
+  Future<bool> verifyOtp({
+    required String phoneNumber,
+    required String code,
+  }) =>
+      _redeemCode(
+        () => _repository.verifyOtp(phoneNumber: phoneNumber, code: code),
+      );
+
+  /// Sets a new password against a reset code, and signs the user in.
+  Future<bool> resetPassword({
+    required String phoneNumber,
+    required String code,
+    required String newPassword,
+  }) =>
+      _redeemCode(
+        () => _repository.resetPassword(
+          phoneNumber: phoneNumber,
+          code: code,
+          newPassword: newPassword,
+        ),
+      );
+
+  /// Shared tail of the two flows that trade a code for a session.
+  Future<bool> _redeemCode(Future<UserModel> Function() call) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      final user = await call();
+      state = AuthState(status: _statusFor(user), user: user);
+      ref.invalidate(savedAccountsProvider);
+      return true;
+    } on ApiException catch (error) {
+      state = state.copyWith(
+        status: AuthStatus.unauthenticated,
+        isSubmitting: false,
+        errorMessage: _otpMessageFor(error),
+        fieldErrors: _extractFieldErrors(error),
+      );
+      return false;
+    }
+  }
+
+  Future<RegistrationResult?> registerResident({
     required String phoneNumber,
     required String password,
     required String firstName,
@@ -173,7 +240,7 @@ class AuthNotifier extends Notifier<AuthState> {
     );
   }
 
-  Future<bool> registerWorker({
+  Future<RegistrationResult?> registerWorker({
     required String phoneNumber,
     required String password,
     required String firstName,
@@ -191,19 +258,27 @@ class AuthNotifier extends Notifier<AuthState> {
     );
   }
 
-  Future<bool> _register(Future<UserModel> Function() call) async {
+  /// Returns the result on success and null on failure.
+  ///
+  /// The result carries `otpSent`, which the code screen needs: registration
+  /// succeeds even when the code could not go out, and that screen must open
+  /// with resend already offered rather than waiting for a code that is not
+  /// coming.
+  Future<RegistrationResult?> _register(
+    Future<RegistrationResult> Function() call,
+  ) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
-      await call();
+      final result = await call();
       state = state.copyWith(isSubmitting: false);
-      return true;
+      return result;
     } on ApiException catch (error) {
       state = state.copyWith(
         isSubmitting: false,
         errorMessage: error.message,
         fieldErrors: _extractFieldErrors(error),
       );
-      return false;
+      return null;
     }
   }
 
@@ -224,11 +299,11 @@ class AuthNotifier extends Notifier<AuthState> {
     ref.invalidate(savedAccountsProvider);
   }
 
-  /// Signs in as a previously used account without a password.
+  /// Signs in as a previously used account without a fresh code.
   ///
   /// Returns false when the shortcut is no longer available — the parked token
   /// expired, was revoked, or was already spent — so the caller can fall back
-  /// to asking for the password. That is not an error state: the account is
+  /// to sending a fresh code. That is not an error state: the account is
   /// still valid, only the shortcut lapsed, and [state] is deliberately left
   /// without an `errorMessage` so the login screen does not show a red banner
   /// for something the user did nothing wrong to cause.
@@ -294,6 +369,21 @@ class AuthNotifier extends Notifier<AuthState> {
   String _loginMessageFor(ApiException error) {
     if (error.isAuthFailure || error.statusCode == 401) {
       return 'Incorrect phone number or password.';
+    }
+    return error.message;
+  }
+
+  /// Turns a rejected code into something a user can act on.
+  ///
+  /// The server answers with one deliberately vague message for every cause —
+  /// wrong code, expired code, attempts exhausted, no such account — because
+  /// distinguishing them would let someone probe which numbers are registered.
+  /// That vagueness is correct on the wire but unhelpful on screen, so the
+  /// remedy is spelled out here instead: whatever went wrong, a fresh code
+  /// fixes it.
+  String _otpMessageFor(ApiException error) {
+    if (error.code == 'invalid_otp') {
+      return 'That code is incorrect or has expired. Tap resend to get a new one.';
     }
     return error.message;
   }

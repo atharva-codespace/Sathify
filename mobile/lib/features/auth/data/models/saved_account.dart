@@ -48,7 +48,7 @@ class SavedAccount {
   /// Null while this account is the active session. See the class note.
   final String? refreshToken;
 
-  /// True when this account can be resumed without typing a password.
+  /// True when this account can be resumed without waiting for a new code.
   bool get canQuickSignIn => refreshToken != null && refreshToken!.isNotEmpty;
 
   String get displayName {

@@ -302,7 +302,7 @@ class AccountScreen extends ConsumerWidget {
     if (!switched) {
       showAppSnackBarOn(
         messenger,
-        'That session expired. Please sign in with your password.',
+        'That session expired. Sign in again to get a new code.',
         tone: AppTone.warning,
       );
       return;
@@ -326,7 +326,7 @@ class AccountScreen extends ConsumerWidget {
         title: const Text('Forget this account?'),
         content: const Text(
           'You will be signed out and this account will be removed from the '
-          'list on this device. Signing back in will need your password.',
+          'list on this device. Signing back in will need a new code.',
         ),
         actions: [
           TextButton(

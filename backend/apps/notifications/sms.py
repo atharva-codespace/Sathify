@@ -70,8 +70,20 @@ def compose(*, title: str, body: str) -> str:
     return text[: MAX_SMS_LENGTH - 1].rstrip() + "…"
 
 
-def send(*, phone_number: str, title: str, body: str) -> SmsResult:
-    """Send one SMS. Never raises."""
+def _auth_headers(config) -> dict:
+    """Present the API key the way this particular gateway expects it."""
+    scheme = (config.get("AUTH_SCHEME") or "").strip()
+    key = config["API_KEY"]
+    return {config.get("AUTH_HEADER", "Authorization"): f"{scheme} {key}".strip()}
+
+
+def send_text(*, phone_number: str, message: str) -> SmsResult:
+    """Send one already-composed message. Never raises.
+
+    The raw entry point, used where the caller owns the exact wording — an OTP
+    body must not be reshaped, both because the code has to survive intact and
+    because Indian carriers match the text against a registered DLT template.
+    """
     if not phone_number:
         return SmsResult(available=False, reason="No phone number for this user.")
 
@@ -84,15 +96,16 @@ def send(*, phone_number: str, title: str, body: str) -> SmsResult:
     config = settings.SMS_SETTINGS
     payload = {
         config.get("TO_FIELD", "to"): phone_number,
-        config.get("MESSAGE_FIELD", "message"): compose(title=title, body=body),
+        config.get("MESSAGE_FIELD", "message"): message,
         "sender": config.get("SENDER_ID", "SATHFY"),
+        **config.get("EXTRA_PARAMS", {}),
     }
 
     try:
         response = requests.post(
             config["ENDPOINT"],
             data=payload,
-            headers={"Authorization": f"Bearer {config['API_KEY']}"},
+            headers=_auth_headers(config),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:
@@ -100,6 +113,9 @@ def send(*, phone_number: str, title: str, body: str) -> SmsResult:
         return SmsResult(sent=False, reason="Could not reach the SMS gateway.")
 
     if response.status_code >= 400:
+        # The body is logged because a gateway's rejection reason is the only
+        # way to tell "wrong API key" from "unregistered DLT template", and
+        # those have completely different fixes. It carries no message text.
         logger.warning(
             "SMS gateway refused a message (%s): %s",
             response.status_code,
@@ -112,4 +128,18 @@ def send(*, phone_number: str, title: str, body: str) -> SmsResult:
     return SmsResult(sent=True)
 
 
-__all__ = ["MAX_SMS_LENGTH", "SmsResult", "compose", "is_configured", "send"]
+def send(*, phone_number: str, title: str, body: str) -> SmsResult:
+    """Send one notification SMS, trimmed to a single billable message."""
+    return send_text(
+        phone_number=phone_number, message=compose(title=title, body=body)
+    )
+
+
+__all__ = [
+    "MAX_SMS_LENGTH",
+    "SmsResult",
+    "compose",
+    "is_configured",
+    "send",
+    "send_text",
+]

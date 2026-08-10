@@ -1,27 +1,33 @@
 """
 Module 1 — Identity & Access Management: API views.
 
+Sign-in is phone number plus password. The OTP has one narrow job — proving a
+phone number is real — and it appears in exactly two places: once at
+registration, and again when somebody has forgotten their password. It is never
+a way to sign in, because a code texted on demand beside a password would be a
+second and weaker credential path into the same account.
+
 Endpoint map (mounted at /api/v1/auth/):
 
-    POST   register/resident/   self-signup, lands unapproved
-    POST   register/worker/     self-signup, lands unapproved
+    POST   register/resident/   self-signup, lands unapproved, sends an OTP
+    POST   register/worker/     self-signup, lands unapproved, sends an OTP
     POST   register/admin/      self-signup, no society until Module 2.1
     POST   staff/               administrator creates a guard/admin (pre-approved)
     POST   login/               phone + password -> access + refresh + profile
+    POST   otp/request/         send a code (registration | password_reset)
+    POST   otp/verify/          finish sign-up -> access + refresh + profile
+    POST   password/reset/      code + new password -> access + refresh + profile
+    POST   password/change/     current + new password, while signed in
     POST   refresh/             rotate the access token
     POST   logout/              blacklist the refresh token, revoke the session
     GET    me/                  caller's own profile
     PATCH  me/                  update own editable fields
-    POST   password/change/
-    POST   otp/request/
-    POST   otp/verify/
     GET    sessions/            devices this user is signed in on
     DELETE sessions/<id>/       revoke a device (own, or admin revoking in-society)
 """
 
 import logging
 
-from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -31,7 +37,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import DeviceSession, User
+from .models import DeviceSession, OtpCode, OtpPurpose, User
 from .permissions import IsSocietyAdmin
 from .serializers import (
     DeviceInfoSerializer,
@@ -42,16 +48,42 @@ from .serializers import (
     OtpVerifyResponseSerializer,
     OtpVerifySerializer,
     PasswordChangeSerializer,
+    PasswordResetSerializer,
     ResidentRegistrationSerializer,
     SathifyTokenObtainPairSerializer,
     SocietyAdminRegistrationSerializer,
     StaffCreationSerializer,
+    TokenPairSerializer,
     UserSerializer,
     WorkerRegistrationSerializer,
 )
-from .services import OtpThrottled, register_device_session, request_otp, verify_otp
+from .services import (
+    OtpThrottled,
+    OtpVerificationError,
+    SMSDeliveryError,
+    complete_registration,
+    register_device_session,
+    request_otp,
+    reset_password_with_otp,
+    revoke_other_sessions,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _error(code, message, details=None, status_code=status.HTTP_400_BAD_REQUEST):
+    """The error envelope every endpoint in this module returns."""
+    return Response(
+        {"error": {"code": code, "message": message, "details": details or {}}},
+        status=status_code,
+    )
+
+
+def _device_from(request):
+    """Pull the optional device block out of a request body."""
+    device = DeviceInfoSerializer(data=request.data.get("device", {}) or {})
+    device.is_valid(raise_exception=False)
+    return device.validated_data
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +92,13 @@ logger = logging.getLogger(__name__)
 
 
 class _BaseRegistrationView(generics.CreateAPIView):
-    """Shared response shape for every self-registration flow."""
+    """Shared response shape for every self-registration flow.
+
+    Creating the account immediately sends a verification code to the number
+    given. Redeeming it at ``otp/verify/`` marks the phone verified and signs
+    the new user in with the password they just chose, so sign-up runs straight
+    through into the app.
+    """
 
     permission_classes = [AllowAny]
     pending_message = "Registration received. An administrator will review your account."
@@ -70,6 +108,19 @@ class _BaseRegistrationView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
 
+        # Dispatch the code the client is about to prompt for.
+        #
+        # A throttle here must not fail the registration: the account is
+        # already created and rolling it back would leave the user unable to
+        # retry with the same number. The client is told no code went out and
+        # offers a resend instead, which the cooldown will then allow.
+        otp_sent = True
+        try:
+            request_otp(user.phone_number, OtpPurpose.REGISTRATION)
+        except (OtpThrottled, SMSDeliveryError) as exc:
+            otp_sent = False
+            logger.warning("No code sent at registration for %s: %s", user.phone_number, exc)
+
         logger.info("Registered %s user %s", user.role, user.phone_number)
         return Response(
             {
@@ -78,6 +129,16 @@ class _BaseRegistrationView(generics.CreateAPIView):
                 # The client shows a "pending approval" screen rather than a
                 # dashboard the user cannot yet act in.
                 "requires_approval": True,
+                # Drives the next screen: the OTP prompt either way, with the
+                # resend button already live when this is false.
+                "otp_sent": otp_sent,
+                "otp_purpose": OtpPurpose.REGISTRATION,
+                "verification_message": (
+                    f"We sent a 6-digit code to {user.phone_number}. "
+                    f"It expires in {OtpCode.VALIDITY_MINUTES} minutes."
+                    if otp_sent
+                    else "We could not send a code just yet. Tap resend in a moment."
+                ),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -150,6 +211,12 @@ class SathifyTokenObtainPairView(TokenObtainPairView):
     Unapproved users CAN sign in. They receive a token whose ``is_approved``
     claim is false, so the app can show them their pending status instead of a
     dead end. Authorisation to act is enforced separately by ``IsApproved``.
+
+    A user who has not yet redeemed their registration code can still sign in
+    with the password they chose — ``is_phone_verified`` stays false and the
+    ``IsPhoneVerified`` permission is what gates anything requiring it. Refusing
+    the sign-in outright would strand somebody whose SMS never arrived, with no
+    screen to ask for another from.
     """
 
     serializer_class = SathifyTokenObtainPairSerializer
@@ -159,16 +226,13 @@ class SathifyTokenObtainPairView(TokenObtainPairView):
         response = super().post(request, *args, **kwargs)
 
         if response.status_code == status.HTTP_200_OK:
-            device = DeviceInfoSerializer(data=request.data.get("device", {}))
-            device.is_valid(raise_exception=False)
-
             user = User.objects.get(pk=response.data["user"]["id"])
             refresh = RefreshToken(response.data["refresh"])
             register_device_session(
                 user=user,
                 refresh_token=refresh,
                 request=request,
-                device=device.validated_data,
+                device=_device_from(request),
             )
             logger.info("Login: %s (%s)", user.phone_number, user.role)
 
@@ -245,6 +309,8 @@ class MeView(generics.RetrieveUpdateAPIView):
     responses={200: MessageResponseSerializer},
 )
 class PasswordChangeView(APIView):
+    """Changing a password you already know, from inside the app."""
+
     permission_classes = [IsAuthenticated]
     serializer_class = PasswordChangeSerializer
 
@@ -257,25 +323,30 @@ class PasswordChangeView(APIView):
 
         # A password change should end every other session: if the change was
         # prompted by a suspected compromise, leaving them alive defeats it.
-        for session in DeviceSession.objects.filter(
-            user=request.user, revoked_at__isnull=True
-        ):
-            session.revoke(reason="Password changed")
+        revoke_other_sessions(request.user, reason="Password changed")
 
         return Response({"message": "Password updated. Please sign in again."})
 
 
 # ---------------------------------------------------------------------------
 # 1.4 OTP & phone verification
+#
+# Two flows, both about proving control of a phone number rather than signing
+# in: verifying a new account, and resetting a forgotten password.
 # ---------------------------------------------------------------------------
 
 
 @extend_schema(
     tags=["Auth"],
     summary="Request an OTP",
-    description="Rate limited: one code per 60 seconds, five per hour per number.",
+    description="Serves phone verification at sign-up and password reset. Rate "
+    "limited: one code per 60 seconds, five per hour per number. Codes are valid "
+    "for 2 minutes and survive 5 wrong guesses before dying.",
     request=OtpRequestSerializer,
-    responses={200: MessageResponseSerializer},
+    responses={
+        200: MessageResponseSerializer,
+        429: OpenApiResponse(description="Resend cooldown or hourly ceiling hit"),
+    },
 )
 class OtpRequestView(APIView):
     permission_classes = [AllowAny]
@@ -290,19 +361,29 @@ class OtpRequestView(APIView):
         try:
             request_otp(phone, purpose)
         except OtpThrottled as exc:
-            return Response(
-                {
-                    "error": {
-                        "code": "throttled",
-                        "message": str(exc),
-                        "details": {"retry_after_seconds": exc.retry_after_seconds},
-                    }
-                },
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            return _error(
+                "throttled",
+                str(exc),
+                {"retry_after_seconds": exc.retry_after_seconds},
+                status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except SMSDeliveryError as exc:
+            # Reported rather than swallowed. The user is about to sit waiting
+            # for a code that is never coming, and "try again" is something they
+            # can act on where a silent success is not.
+            logger.error("Could not deliver an OTP to %s: %s", phone, exc)
+            return _error(
+                "sms_unavailable",
+                "We could not send a code just now. Please try again in a moment.",
+                {},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
         # Never reveal whether the number is registered — that would turn this
-        # endpoint into a user-enumeration oracle.
+        # endpoint into a user-enumeration oracle. Note that request_otp is
+        # called for unknown numbers too, so the timing matches as well as the
+        # wording; short-circuiting on "no such user" would leak through latency
+        # what this message is careful not to say.
         return Response(
             {"message": "If that number is valid, a verification code has been sent."}
         )
@@ -310,9 +391,15 @@ class OtpRequestView(APIView):
 
 @extend_schema(
     tags=["Auth"],
-    summary="Verify an OTP",
+    summary="Verify a new account's phone number",
+    description="Finishes sign-up. A correct code marks the phone verified and "
+    "signs the new user in, so they do not have to retype the password they set "
+    "moments earlier. Every later sign-in uses `login/`.",
     request=OtpVerifySerializer,
-    responses={200: OtpVerifyResponseSerializer},
+    responses={
+        200: OtpVerifyResponseSerializer,
+        400: OpenApiResponse(description="Code incorrect, expired, or out of attempts"),
+    },
 )
 class OtpVerifyView(APIView):
     permission_classes = [AllowAny]
@@ -321,31 +408,62 @@ class OtpVerifyView(APIView):
     def post(self, request):
         serializer = OtpVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        phone = serializer.validated_data["phone_number"]
 
-        if not verify_otp(
-            phone,
-            serializer.validated_data["purpose"],
-            serializer.validated_data["code"],
-        ):
-            return Response(
-                {
-                    "error": {
-                        "code": "invalid_otp",
-                        "message": "That code is incorrect or has expired.",
-                        "details": {},
-                    }
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+        try:
+            user, tokens = complete_registration(
+                phone_number=serializer.validated_data["phone_number"],
+                code=serializer.validated_data["code"],
+                request=request,
+                device=_device_from(request),
             )
+        except OtpVerificationError as exc:
+            return _error("invalid_otp", str(exc))
 
-        updated = User.objects.filter(phone_number=phone, is_phone_verified=False).update(
-            is_phone_verified=True, updated_at=timezone.now()
+        return Response(
+            {"verified": True, **tokens, "user": UserSerializer(user).data}
         )
-        if updated:
-            logger.info("Phone verified for %s", phone)
 
-        return Response({"verified": True, "message": "Phone number verified."})
+
+@extend_schema(
+    tags=["Auth"],
+    summary="Reset a forgotten password",
+    description="Takes a code requested with `purpose=password_reset` plus the "
+    "new password. Signs the user in and revokes every other session.",
+    request=PasswordResetSerializer,
+    responses={
+        200: TokenPairSerializer,
+        400: OpenApiResponse(description="Code incorrect, expired, or password rejected"),
+    },
+)
+class PasswordResetView(APIView):
+    """"Forgot password", answered by SMS rather than by email.
+
+    Module 1.4's premise: many domestic workers have no reliable email address,
+    so an emailed reset link would exclude a large share of the users this
+    platform exists for. The phone number is the account's anchor, so proving
+    control of it is both the strongest signal available and the one every user
+    can actually complete.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = PasswordResetSerializer
+
+    def post(self, request):
+        serializer = PasswordResetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            user, tokens = reset_password_with_otp(
+                phone_number=serializer.validated_data["phone_number"],
+                code=serializer.validated_data["code"],
+                new_password=serializer.validated_data["new_password"],
+                request=request,
+                device=_device_from(request),
+            )
+        except OtpVerificationError as exc:
+            return _error("invalid_otp", str(exc))
+
+        return Response({**tokens, "user": UserSerializer(user).data})
 
 
 # ---------------------------------------------------------------------------

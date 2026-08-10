@@ -455,7 +455,14 @@ class Command(BaseCommand):
         self.stdout.write(line)
         self.stdout.write(f"  Society : {society.name}, {society.city} (id={society.id}, {society.status})")
         self.stdout.write(f"  Towers  : {len(towers)}    Flats: {len(flats)}    Gates: {society.gates.count()}")
-        self.stdout.write(f"\n  Password for EVERY account below: {DEMO_PASSWORD}\n")
+        self.stdout.write(f"\n  Password for EVERY account below: {DEMO_PASSWORD}")
+        self.stdout.write(
+            # ASCII only: this goes to a Windows console under cp1252, where an
+            # em-dash renders as a replacement character.
+            "  These accounts are already phone-verified, so they sign in with\n"
+            "  the password alone. A new sign-up's 6-digit code is printed to\n"
+            "  this console by the default SMS backend.\n"
+        )
         self.stdout.write(f"  {'ROLE':<16}{'PHONE':<14}{'NAME'}")
         self.stdout.write("  " + "-" * 68)
         for phone, first, last, role in ACCOUNTS:

@@ -8,6 +8,10 @@ because the rules genuinely differ:
 * Guards and administrators are CREATED BY a society administrator — they are
   trusted operational staff, not open sign-ups, so exposing them to
   self-registration would let anyone claim gate authority.
+
+Sign-in is phone number plus password. The OTP has a narrower job — proving the
+phone number is real at sign-up, and re-proving it when a password has been
+forgotten — so it appears only in those two flows, never as a way to sign in.
 """
 
 from django.contrib.auth.password_validation import validate_password
@@ -33,11 +37,8 @@ class SathifyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        token["role"] = user.role
-        token["society_id"] = user.society_id
-        token["is_approved"] = user.is_approved
-        token["full_name"] = user.get_full_name()
-        token["preferred_language"] = user.preferred_language
+        for claim, value in token_claims_for(user).items():
+            token[claim] = value
         return token
 
     def validate(self, attrs):
@@ -45,6 +46,23 @@ class SathifyTokenObtainPairSerializer(TokenObtainPairSerializer):
         data = super().validate(attrs)
         data["user"] = UserSerializer(self.user).data
         return data
+
+
+def token_claims_for(user) -> dict:
+    """The custom claims every Sathify token carries, however it was issued.
+
+    Shared with ``services.build_token_pair`` so a token minted after the
+    registration OTP is indistinguishable from one minted at password sign-in.
+    When these drifted apart, a newly registered user's app read a token with no
+    ``role`` claim and could not choose a dashboard.
+    """
+    return {
+        "role": user.role,
+        "society_id": user.society_id,
+        "is_approved": user.is_approved,
+        "full_name": user.get_full_name(),
+        "preferred_language": user.preferred_language,
+    }
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -88,10 +106,19 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class _BaseRegistrationSerializer(serializers.ModelSerializer):
-    """Shared password handling and phone-uniqueness rules."""
+    """Shared password handling and phone-uniqueness rules.
 
-    password = serializers.CharField(write_only=True, min_length=8, style={"input_type": "password"})
-    password_confirm = serializers.CharField(write_only=True, style={"input_type": "password"})
+    The password set here is the credential for every future sign-in. The OTP
+    that follows registration verifies the phone number; it does not replace
+    this.
+    """
+
+    password = serializers.CharField(
+        write_only=True, min_length=8, style={"input_type": "password"}
+    )
+    password_confirm = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
 
     class Meta:
         model = User
@@ -204,6 +231,9 @@ class StaffCreationSerializer(serializers.ModelSerializer):
     Created pre-approved and scoped to the creating administrator's society —
     an administrator cannot mint staff for a society they do not run. The
     society is taken from the request user, never from the payload.
+
+    The administrator sets an initial password and passes it to the new staff
+    member, who should change it once signed in.
     """
 
     password = serializers.CharField(write_only=True, min_length=8)
@@ -252,11 +282,38 @@ class OtpRequestSerializer(serializers.Serializer):
 
 
 class OtpVerifySerializer(serializers.Serializer):
+    """The registration code, plus the device it is being redeemed on.
+
+    ``device`` is optional but strongly wanted: without it the session lands
+    under ``unknown-device`` and Module 1.5's "sign out my other phone" list
+    cannot tell two installations apart.
+    """
+
     phone_number = serializers.CharField(max_length=13, validators=[phone_validator])
     code = serializers.CharField(min_length=6, max_length=6)
-    purpose = serializers.ChoiceField(
-        choices=OtpPurpose.choices, default=OtpPurpose.REGISTRATION
-    )
+    device = serializers.DictField(required=False)
+
+
+class PasswordResetSerializer(serializers.Serializer):
+    """Set a new password against a code texted to the account's phone.
+
+    No current password is asked for — the user is here precisely because they
+    do not have it. The code is the proof, which is why it is scoped to
+    ``password_reset`` and cannot be a leftover registration code.
+    """
+
+    phone_number = serializers.CharField(max_length=13, validators=[phone_validator])
+    code = serializers.CharField(min_length=6, max_length=6)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+    device = serializers.DictField(required=False)
+
+    def validate_new_password(self, value):
+        # No user instance to compare against: this runs before the code is
+        # checked, and looking the account up by the phone number in an
+        # unauthenticated payload — just to enrich a validation message — would
+        # leak whether that number is registered.
+        validate_password(value)
+        return value
 
 
 class LogoutSerializer(serializers.Serializer):
@@ -272,12 +329,28 @@ class MessageResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
 
 
-class OtpVerifyResponseSerializer(serializers.Serializer):
+class TokenPairSerializer(serializers.Serializer):
+    """A signed-in session, declared for the OpenAPI schema.
+
+    Password sign-in, the registration OTP and a completed password reset all
+    resolve to this exact shape, so the Flutter client has one success path to
+    handle rather than three.
+    """
+
+    access = serializers.CharField(help_text="Bearer token, valid 60 minutes.")
+    refresh = serializers.CharField(
+        help_text="Valid 30 days. Rotated on every use; the spent one is blacklisted."
+    )
+    user = UserSerializer()
+
+
+class OtpVerifyResponseSerializer(TokenPairSerializer):
     verified = serializers.BooleanField()
-    message = serializers.CharField()
 
 
 class PasswordChangeSerializer(serializers.Serializer):
+    """Changing a password you already know, from inside the app."""
+
     current_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True, min_length=8)
 

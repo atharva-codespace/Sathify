@@ -8,7 +8,9 @@ import '../../features/auth/data/models/user_model.dart';
 import '../../features/auth/presentation/providers/auth_provider.dart';
 import '../../features/auth/presentation/screens/account_screen.dart';
 import '../../features/auth/presentation/screens/login_screen.dart';
+import '../../features/auth/presentation/screens/otp_screen.dart';
 import '../../features/auth/presentation/screens/pending_approval_screen.dart';
+import '../../features/auth/presentation/screens/reset_password_screen.dart';
 import '../../features/administration/presentation/screens/admin_dashboard_screen.dart';
 import '../../features/administration/presentation/screens/admin_home_screen.dart';
 import '../../features/administration/presentation/screens/complaint_detail_screen.dart';
@@ -60,6 +62,17 @@ class Routes {
   static const String login = '/login';
   static const String registerResident = '/register/resident';
   static const String registerWorker = '/register/worker';
+
+  /// Module 1.4 — phone verification, the last step of sign-up.
+  ///
+  /// Takes `phone` and `sent` as query parameters rather than constructor
+  /// arguments so a user who backgrounds the app mid-flow returns to the same
+  /// prompt instead of the login screen.
+  static const String otp = '/otp';
+
+  /// Module 1.4 — "forgot password": a code plus the new password.
+  static const String resetPassword = '/reset-password';
+
   static const String pendingApproval = '/pending-approval';
 
   /// The Account tab. Home for the profile, the account switcher and sign-out.
@@ -320,6 +333,25 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: Routes.registerWorker,
             builder: (_, __) => const RegisterScreen(role: UserRole.worker),
+          ),
+          GoRoute(
+            path: Routes.otp,
+            builder: (_, goState) {
+              final params = goState.uri.queryParameters;
+              return OtpScreen(
+                phoneNumber: params['phone'] ?? '',
+                // Absent means "no code has gone out yet", so the screen sends
+                // one on open. Only the flows that already triggered a send
+                // pass sent=true.
+                codeAlreadySent: params['sent'] == 'true',
+              );
+            },
+          ),
+          GoRoute(
+            path: Routes.resetPassword,
+            builder: (_, goState) => ResetPasswordScreen(
+              phoneNumber: goState.uri.queryParameters['phone'] ?? '',
+            ),
           ),
           GoRoute(
             path: Routes.pendingApproval,
@@ -609,6 +641,9 @@ const _publicRoutes = {
   Routes.login,
   Routes.registerResident,
   Routes.registerWorker,
+  // Necessarily public: both are reached by a user who is not signed in.
+  Routes.otp,
+  Routes.resetPassword,
 };
 
 /// Reachable while signed in but not yet approved.

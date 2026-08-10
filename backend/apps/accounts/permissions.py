@@ -20,7 +20,14 @@ from .models import Role
 
 
 class _RolePermission(BasePermission):
-    """Base for single-role checks. Subclasses set ``required_role``."""
+    """Base for single-role checks. Subclasses set ``required_role``.
+
+    Default-deny in the strict sense: access is granted only on a positive match
+    against one of the four known roles. ``required_role`` is never left at its
+    empty default by a real subclass, and the explicit guard below makes sure a
+    subclass that forgot to set it denies everyone rather than matching every
+    user whose role is somehow blank.
+    """
 
     required_role: str = ""
     message = "Your account role does not have access to this resource."
@@ -30,6 +37,10 @@ class _RolePermission(BasePermission):
         return bool(
             user
             and user.is_authenticated
+            # Both halves must name a real role. Comparing two empty strings
+            # would otherwise succeed, which is the one way a "deny by default"
+            # check can accidentally say yes.
+            and self.required_role in Role.values
             and user.role == self.required_role
         )
 

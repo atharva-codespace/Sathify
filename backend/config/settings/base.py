@@ -9,6 +9,8 @@ Settings are grouped to mirror the module structure so four people working on
 different modules can find their own configuration quickly.
 """
 
+import json
+import warnings
 from datetime import timedelta
 from pathlib import Path
 
@@ -418,15 +420,56 @@ FCM_SETTINGS = {
     "PROJECT_ID": env("FCM_PROJECT_ID", default=""),
 }
 
-# --- Module 10.2: SMS fallback ----------------------------------------------
+# --- SMS: Module 1.4 OTP delivery and Module 10.2 notification fallback -------
 # Provider-agnostic on purpose. Indian SMS gateways (MSG91, Textlocal, Fast2SMS)
 # all expose a simple authenticated HTTP POST, so the provider is configuration
 # rather than code, and no vendor SDK is pulled in for one request.
+#
+# Filling these in is what makes OTPs arrive on real phones: apps.accounts
+# selects its backend from this config, so there is no second switch to set.
+# With it off, codes print to the runserver console in DEBUG and nothing is
+# delivered at all otherwise.
 #
 # Disabled by default: SMS costs real money per message and there is no account
 # on this project. With it off, a failed push is recorded as undelivered and the
 # in-app notification centre still holds the message — which is the point of
 # Module 10.3 existing alongside the push channel.
+#
+# INDIA: carriers require the sender to be DLT-registered (TRAI). A gateway
+# account alone is not enough — the header and the message template must both
+# be registered, or messages are accepted by the API and dropped by the carrier.
+# ``SMS_BACKEND`` forces a specific backend; leave it empty to choose from config.
+SMS_BACKEND = env("SMS_BACKEND", default="")
+
+
+def _sms_extra_params() -> dict:
+    """Parse SMS_EXTRA_PARAMS, tolerating a blank or malformed value.
+
+    ``env.json`` raises on an empty string, and an empty string is exactly what
+    a half-filled ``.env`` contains — ``SMS_EXTRA_PARAMS=`` with nothing after
+    it. Letting that propagate takes the whole server down at import time, on a
+    setting that only matters to one optional gateway field. Degrading to "no
+    extra params" keeps the server up and puts the problem where it can be read.
+    """
+    raw = env("SMS_EXTRA_PARAMS", default="").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        warnings.warn(
+            f"SMS_EXTRA_PARAMS is not valid JSON and was ignored: {raw!r}",
+            stacklevel=2,
+        )
+        return {}
+
+    if not isinstance(parsed, dict):
+        warnings.warn(
+            f"SMS_EXTRA_PARAMS must be a JSON object, got {type(parsed).__name__}; ignored.",
+            stacklevel=2,
+        )
+        return {}
+    return parsed
 SMS_SETTINGS = {
     "ENABLED": env.bool("SMS_ENABLED", default=False),
     "ENDPOINT": env("SMS_ENDPOINT", default=""),
@@ -436,6 +479,18 @@ SMS_SETTINGS = {
     # switch provider.
     "TO_FIELD": env("SMS_TO_FIELD", default="to"),
     "MESSAGE_FIELD": env("SMS_MESSAGE_FIELD", default="message"),
+    # How the key is presented. The Indian gateways disagree about this and the
+    # disagreement is the whole reason a request gets a 401 rather than a
+    # delivery: MSG91 wants `authkey: <key>`, Fast2SMS wants
+    # `authorization: <key>` with no scheme word, Textlocal wants it as a form
+    # field. Defaults match the RFC-style `Authorization: Bearer <key>`.
+    "AUTH_HEADER": env("SMS_AUTH_HEADER", default="Authorization"),
+    #: Empty means send the bare key with no scheme prefix.
+    "AUTH_SCHEME": env("SMS_AUTH_SCHEME", default="Bearer"),
+    # Static form fields the gateway requires beyond to/message — Fast2SMS
+    # needs `route`, some need `flash` or a DLT template id. JSON so a new
+    # provider requirement never needs a code change.
+    "EXTRA_PARAMS": _sms_extra_params(),
 }
 
 # --- Logging ----------------------------------------------------------------

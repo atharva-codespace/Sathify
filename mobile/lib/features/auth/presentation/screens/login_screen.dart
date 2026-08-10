@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/routing/app_router.dart';
 import '../../../../shared/design_system.dart';
 import '../../data/models/saved_account.dart';
+import '../../data/repositories/auth_repository.dart';
 import '../providers/auth_provider.dart';
 
 /// Phone + password sign-in (Module 1.1), with the saved-accounts list as the
@@ -14,8 +17,11 @@ import '../providers/auth_provider.dart';
 /// The screen has two modes. When this device has signed in before it opens on
 /// the account list, because the overwhelmingly common case is somebody
 /// returning to an account they already use — the same reasoning behind Gmail's
-/// and Netflix's switchers. Typing a phone number and password is the fallback,
-/// reached by "Use another account" or by a lapsed quick sign-in.
+/// and Netflix's switchers. Typing a phone number is the fallback, reached by
+/// "Use another account" or by a lapsed quick sign-in.
+///
+/// "Forgot password" is answered by a code to the phone rather than a link to
+/// an email, which many users here do not have.
 ///
 /// Still deliberately plain in its mechanics: large touch targets, one field per
 /// row, errors under the field they belong to. Users span a wide range of
@@ -99,6 +105,60 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _notice = '$notice Signing in as ${account.displayName}.';
     });
     _passwordFocus.requestFocus();
+  }
+
+  /// "Forgot password" — a code to the phone rather than a link to an email.
+  ///
+  /// Only the phone number is validated before sending, so an empty password
+  /// box does not block the one action taken by users who have no password to
+  /// type. Confirmed first because succeeding signs the user out everywhere
+  /// else, which is right after a compromise and a surprise otherwise.
+  Future<void> _startPasswordReset() async {
+    final phone = _phoneController.text.trim();
+    if (_validatePhone(phone) != null) {
+      showAppSnackBar(context, 'Enter your phone number first.');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset your password?'),
+        content: Text(
+          'We will text a 6-digit code to $phone. You can then choose a new '
+          'password. This signs you out on every other device.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Send code'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final sent = await ref
+        .read(authProvider.notifier)
+        .requestOtp(phoneNumber: phone, purpose: OtpPurpose.passwordReset);
+    if (!mounted || !sent) return;
+
+    // Not awaited: this completes only when the reset screen is popped, and
+    // there is nothing for this method to do at that point.
+    unawaited(
+      context.push(
+        Uri(
+          path: Routes.resetPassword,
+          queryParameters: {'phone': phone},
+        ).toString(),
+      ),
+    );
   }
 
   Future<void> _confirmForget(SavedAccount account) async {
@@ -285,9 +345,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             onPressed: _submit,
           ),
 
+          const SizedBox(height: AppSpacing.xs),
+          // Answered by SMS rather than email: Module 1.4's premise is that
+          // many users here have no reliable email address, so a reset link
+          // would exclude exactly the people it most needs to reach.
+          AppButton.text(
+            label: 'Forgot password?',
+            icon: Icons.lock_reset_outlined,
+            expand: true,
+            onPressed: state.isSubmitting ? null : _startPasswordReset,
+          ),
+
           // Only offered when there is something to go back to.
           if (hasSaved) ...[
-            const SizedBox(height: AppSpacing.xs),
+            const SizedBox(height: AppSpacing.xxs),
             AppButton.text(
               label: 'Back to saved accounts',
               icon: Icons.arrow_back_rounded,

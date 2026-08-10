@@ -9,6 +9,7 @@ import '../../../../core/routing/app_router.dart';
 import '../../../societies/data/models/society_models.dart';
 import '../../../societies/presentation/providers/society_provider.dart';
 import '../../data/models/user_model.dart';
+import '../../data/repositories/auth_repository.dart';
 import '../providers/auth_provider.dart';
 
 /// Registration for residents and domestic workers (Module 1.1 + 2.3).
@@ -64,36 +65,54 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     final register =
         _isWorker ? notifier.registerWorker : notifier.registerResident;
 
-    final succeeded = await register(
-      phoneNumber: _phoneController.text.trim(),
+    final phone = _phoneController.text.trim();
+    final result = await register(
+      phoneNumber: phone,
       password: _passwordController.text,
       firstName: _firstNameController.text.trim(),
       lastName: _lastNameController.text.trim(),
       societyId: _selectedSociety!.id,
     );
 
-    if (!mounted) return;
-    if (succeeded) {
-      // Awaited, so that *this* screen owns what happens next.
-      //
-      // The dialog used to navigate for itself with two bare
-      // `Navigator.of(context).pop()` calls — one for itself and one meant for
-      // this screen. Under go_router the second pop is not this screen's: the
-      // routes live in the ShellRoute's nested navigator, so it hits the root
-      // navigator's last route and takes the app down with it. The dialog now
-      // only closes itself, and the route change happens here.
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => _RegistrationSuccessDialog(isWorker: _isWorker),
-      );
+    if (!mounted || result == null) return;
 
-      if (!mounted) return;
-      // `go`, not `pop`: registration is a finished chapter, and this works
-      // identically whether the screen was pushed from sign-in or opened
-      // cold from a deep link — where there is nothing to pop at all.
-      context.go(Routes.login);
-    }
+    // Awaited, so that *this* screen owns what happens next.
+    //
+    // The dialog used to navigate for itself with two bare
+    // `Navigator.of(context).pop()` calls — one for itself and one meant for
+    // this screen. Under go_router the second pop is not this screen's: the
+    // routes live in the ShellRoute's nested navigator, so it hits the root
+    // navigator's last route and takes the app down with it. The dialog now
+    // only closes itself, and the route change happens here.
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _RegistrationSuccessDialog(
+        isWorker: _isWorker,
+        phoneNumber: phone,
+      ),
+    );
+
+    if (!mounted) return;
+    // Straight to the code prompt, not back to sign-in: the server has already
+    // texted a code, and sending the user to a login screen would waste it and
+    // make them ask for another.
+    //
+    // `go`, not `push`: registration is a finished chapter, and this works
+    // identically whether the screen was pushed from sign-in or opened cold
+    // from a deep link — where there is nothing to pop at all.
+    context.go(
+      Uri(
+        path: Routes.otp,
+        queryParameters: {
+          'phone': phone,
+          'purpose': OtpPurpose.registration.wireValue,
+          // False when the server's throttle bit; the code screen then opens
+          // with resend live instead of waiting on a code that never went out.
+          'sent': result.otpSent.toString(),
+        },
+      ).toString(),
+    );
   }
 
   String? _validatePhone(String? value) {
@@ -103,6 +122,33 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       return 'Enter a valid 10-digit mobile number';
     }
     return null;
+  }
+
+  /// Fields whose server-side errors are already shown under their input.
+  static const _boundFields = {
+    'first_name',
+    'last_name',
+    'phone_number',
+    'password',
+  };
+
+  /// The banner text, with any error the form cannot attribute appended.
+  ///
+  /// Without this, a server complaint about a field this screen does not render
+  /// vanishes: `fieldErrors` holds it, no `errorText` is bound to it, and the
+  /// user is left with a bare "One or more fields failed validation" and no way
+  /// to know what failed. That is exactly what a client/server version skew
+  /// looks like — an app that has stopped sending a field the deployed server
+  /// still demands — and it is the case where a legible message matters most,
+  /// because nothing the user does to the form can fix it.
+  String _errorText(AuthState state) {
+    final unattributed = state.fieldErrors.entries
+        .where((entry) => !_boundFields.contains(entry.key))
+        .map((entry) => '${entry.key}: ${entry.value}')
+        .toList();
+
+    if (unattributed.isEmpty) return state.errorMessage!;
+    return '${state.errorMessage!}\n${unattributed.join('\n')}';
   }
 
   @override
@@ -150,7 +196,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 ],
                 decoration: InputDecoration(
                   labelText: 'Phone number',
-                  helperText: 'You will sign in with this number',
+                  helperText: 'We will text a code here to verify it',
                   prefixIcon: const Icon(Icons.phone_outlined),
                   errorText: state.fieldErrors['phone_number'],
                 ),
@@ -162,7 +208,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 obscureText: _obscurePassword,
                 decoration: InputDecoration(
                   labelText: 'Password',
-                  helperText: 'At least 8 characters',
+                  helperText: 'At least 8 characters. Used every time you sign in.',
                   prefixIcon: const Icon(Icons.lock_outline),
                   errorText: state.fieldErrors['password'],
                   suffixIcon: IconButton(
@@ -196,7 +242,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               if (state.errorMessage != null) ...[
                 const SizedBox(height: 16),
                 Text(
-                  state.errorMessage!,
+                  _errorText(state),
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ],
@@ -314,9 +360,13 @@ class _SocietyPicker extends ConsumerWidget {
 }
 
 class _RegistrationSuccessDialog extends StatelessWidget {
-  const _RegistrationSuccessDialog({required this.isWorker});
+  const _RegistrationSuccessDialog({
+    required this.isWorker,
+    required this.phoneNumber,
+  });
 
   final bool isWorker;
+  final String phoneNumber;
 
   @override
   Widget build(BuildContext context) {
@@ -324,11 +374,9 @@ class _RegistrationSuccessDialog extends StatelessWidget {
       icon: const Icon(Icons.check_circle_outline, size: 48),
       title: const Text('Account created'),
       content: Text(
-        isWorker
-            ? 'Next, sign in and upload your Aadhaar card and photo to complete '
-                'verification.'
-            : 'Next, sign in and choose your flat so your administrator can '
-                'approve you.',
+        'We texted a 6-digit code to $phoneNumber. Enter it to verify your '
+        'number and finish signing in.\n\n'
+        '${isWorker ? 'After that, upload your Aadhaar card and photo to complete verification.' : 'After that, choose your flat so your administrator can approve you.'}',
       ),
       actions: [
         TextButton(
@@ -336,7 +384,7 @@ class _RegistrationSuccessDialog extends StatelessWidget {
           // this and handles the route change; popping twice from here reaches
           // past go_router's navigator and crashes.
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Go to sign in'),
+          child: const Text('Enter code'),
         ),
       ],
     );

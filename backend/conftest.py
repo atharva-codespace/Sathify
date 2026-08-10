@@ -6,10 +6,13 @@ authenticated client for any of the four roles in one line, which matters when
 four people are writing tests in parallel across different apps.
 """
 
+import re
+
 import pytest
+from django.urls import reverse
 from rest_framework.test import APIClient
 
-from apps.accounts.models import Role
+from apps.accounts.models import OtpCode, OtpPurpose, Role
 from apps.societies.models import Society, SocietyStatus
 
 
@@ -17,6 +20,63 @@ from apps.societies.models import Society, SocietyStatus
 def api_client():
     """An unauthenticated DRF test client."""
     return APIClient()
+
+
+# ---------------------------------------------------------------------------
+# OTP helpers
+#
+# The plaintext code is handed to the SMS backend exactly once and never
+# persisted, so a test that needs to read one intercepts delivery rather than
+# reaching for a hash it is not meant to be able to reverse. Intercepting is how
+# a real user gets the code too, which makes it the honest seam to test at.
+# ---------------------------------------------------------------------------
+
+
+class RecordingSMSBackend:
+    """Captures what would have been texted, so tests can read the code."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, phone_number, message):
+        self.sent.append((phone_number, message))
+
+    def code_for(self, phone_number):
+        """The most recent code texted to ``phone_number``."""
+        for number, message in reversed(self.sent):
+            if number == phone_number:
+                match = re.search(rf"\b(\d{{{OtpCode.CODE_LENGTH}}})\b", message)
+                assert match, f"no code found in the message sent to {number}"
+                return match.group(1)
+        raise AssertionError(f"no code was sent to {phone_number}")
+
+
+@pytest.fixture
+def otp_outbox(monkeypatch):
+    """Intercepts OTP delivery for the duration of one test."""
+    outbox = RecordingSMSBackend()
+    monkeypatch.setattr("apps.accounts.services.get_sms_backend", lambda: outbox)
+    return outbox
+
+
+@pytest.fixture
+def request_otp_code(api_client, otp_outbox):
+    """Factory: ``request_otp_code(phone, purpose)`` -> the plaintext code.
+
+    Goes over HTTP rather than calling the service directly, so the request half
+    of each flow is exercised too.
+    """
+
+    def _request(phone_number, purpose=OtpPurpose.REGISTRATION):
+        response = api_client.post(
+            reverse("v1:accounts:otp-request"),
+            {"phone_number": phone_number, "purpose": purpose},
+            format="json",
+        )
+        assert response.status_code == 200, response.data
+        return otp_outbox.code_for(phone_number)
+
+    return _request
 
 
 @pytest.fixture

@@ -142,7 +142,31 @@ cd mobile
 flutter run
 ```
 
-Demo logins, all with password `Sathify@123`:
+Demo logins, all with password `Sathify@123`. These accounts are already
+phone-verified, so they sign in with the password alone.
+
+Registering a *new* account texts a 6-digit code to verify the number, and the
+default SMS backend prints it to the `runserver` console:
+
+```
+==============================================================
+  SMS -> 9812345670
+  483920 is your Sathify verification code. It expires in 2 minutes. Do not share it.
+==============================================================
+```
+
+The same console is where "forgot password" codes appear. Codes are valid for 2
+minutes and die after 5 wrong guesses, so read one fresh rather than reusing it.
+
+**To deliver codes to a real phone instead**, fill in the `SMS_*` block in
+`backend/.env` — `SMS_ENABLED=True`, the endpoint, and the API key. Nothing else
+switches: the OTP backend is chosen from that config, so credentials in means
+real SMS out, and credentials missing means the console.
+
+Read the DLT note in `.env.example` before you buy anything. Indian carriers
+require the *sender* to be registered with TRAI — entity, header and message
+template — and an unregistered template is accepted by the gateway's API and
+then dropped by the carrier, so a `200` is not proof anybody received it.
 
 | Role | Phone | Name |
 | --- | --- | --- |
@@ -258,6 +282,37 @@ python -m pip install -r requirements/ml.txt   # several GB; see docs first
 Everything runs without either. OCR and face verification report themselves
 unavailable and fall back to manual entry, which is a supported state — see the
 graceful-degradation rule under Conventions.
+
+### Checking a change against CI before you push
+
+A green `pytest` in your normal environment does **not** mean CI will pass. CI
+installs `requirements/dev.txt` + `cv.txt` and nothing else — no `prod.txt`, no
+`ml.txt` — so anything the code names from those files works for you and fails
+there. Not hypothetical: one `whitenoise` import in `config/settings/base.py`
+produced 620 failures across four consecutive red runs while the suite stayed
+green on every machine here.
+
+A second environment holding exactly what CI installs settles it in under a
+minute. Build it once:
+
+```bash
+cd backend
+python -m venv .venv-ci
+.venv-ci/Scripts/python.exe -m pip install -r requirements/dev.txt -r requirements/cv.txt
+```
+
+Then, before pushing anything that touches settings, imports or dependencies:
+
+```bash
+.venv-ci/Scripts/python.exe manage.py check
+.venv-ci/Scripts/python.exe manage.py makemigrations --check --dry-run
+.venv-ci/Scripts/python.exe -m pytest -m "not ml" -q
+```
+
+Those three are the backend CI job verbatim — same order, same flags. On
+macOS/Linux the path is `.venv-ci/bin/python`. `.venv-ci` is git-ignored, and it
+deliberately cannot run the `ml`-marked tests, so keep your usual `.venv` for
+day-to-day work.
 
 ## Getting started — mobile (step by step)
 
@@ -379,7 +434,7 @@ registers a token that nothing ever pushes to.
 | `flutter test` fails in `test/widget_test.dart` | Someone ran `flutter create` in `mobile/`. Delete `mobile/test/widget_test.dart`, `mobile/README.md`, and `mobile/android/app/src/main/kotlin/com/sathify/sathify/`. |
 | A screen renders blank on a device although its widget tests pass | Almost always a layout failure that only happens under the app's own theme — `AppTheme` makes buttons full-width (`minimumSize: Size.fromHeight(...)` leaves the width at `double.infinity`), which breaks any parent that needs an intrinsic width. Pump screens as `MaterialApp(theme: AppTheme.light, home: …)`; a bare `MaterialApp` uses Material's defaults and hides it. Get the cause from the device: `adb logcat -d \| grep "caught a widget error"` — the **first** line is the real fault, the `RenderBox was not laid out` flood after it is cascade. |
 | Checking a screen from a photo of the phone | Use `adb exec-out screencap -p > out.png` instead. Loading skeletons are `#F0F2EF` on white and vanish in a photo, so "still loading" and "rendered nothing" look identical. |
-| CI fails with `ModuleNotFoundError` on a package, but the suite passes locally | Your machine has something CI does not. CI installs **only** `requirements/dev.txt` + `requirements/cv.txt` — not `prod.txt`, not `ml.txt` — so a setting or import naming anything from those files works for you and fails there. `apps/core/test_settings_imports.py` catches the settings case with one clear failure; for the rest, reproduce it by making the package unimportable rather than by reading the traceback 600 times. |
+| CI fails with `ModuleNotFoundError` on a package, but the suite passes locally | Your machine has something CI does not. CI installs **only** `requirements/dev.txt` + `requirements/cv.txt` — not `prod.txt`, not `ml.txt` — so a setting or import naming anything from those files works for you and fails there. `apps/core/test_settings_imports.py` catches the settings case with one clear failure; to reproduce any of it locally, run the suite in `.venv-ci` — see "Checking a change against CI before you push". |
 | First request after a break takes ~50 s | Render's free instance was asleep. Expected — see [docs/free-tier-constraints.md](docs/free-tier-constraints.md) §2. |
 | Android builds take tens of minutes on Windows | Antivirus scanning Gradle's file churn. Run `optimize-windows-build.ps1` as Administrator. |
 | Superuser logs in and sees an empty app | It has no society. Run `python manage.py seed_demo`, which adopts existing superusers into the demo society. |

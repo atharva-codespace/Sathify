@@ -39,6 +39,10 @@ ProviderContainer _containerWith(MockAuthRepository mock) {
 }
 
 void main() {
+  // mocktail needs a concrete instance before `any(named: 'purpose')` can
+  // stand in for an OtpPurpose. The value is never read — only matched against.
+  setUpAll(() => registerFallbackValue(OtpPurpose.registration));
+
   group('role routing', () {
     test('each role maps to its own home route', () {
       expect(homeRouteForRole(UserRole.resident), Routes.residentHome);
@@ -76,13 +80,17 @@ void main() {
       when(() => repository.hasSession()).thenAnswer((_) async => false);
     });
 
-    test('an approved user becomes authenticated', () async {
+    void stubLogin(UserModel user) {
       when(
         () => repository.login(
           phoneNumber: any(named: 'phoneNumber'),
           password: any(named: 'password'),
         ),
-      ).thenAnswer((_) async => _user());
+      ).thenAnswer((_) async => user);
+    }
+
+    test('an approved user becomes authenticated', () async {
+      stubLogin(_user());
 
       final container = _containerWith(repository);
       await container
@@ -97,12 +105,7 @@ void main() {
     test('an unapproved user lands on pendingApproval, not authenticated', () async {
       // Registration alone grants nothing (SRS 3.1/3.2) — but the user must
       // still reach an explanatory screen rather than a dead end.
-      when(
-        () => repository.login(
-          phoneNumber: any(named: 'phoneNumber'),
-          password: any(named: 'password'),
-        ),
-      ).thenAnswer((_) async => _user(role: UserRole.worker, isApproved: false));
+      stubLogin(_user(role: UserRole.worker, isApproved: false));
 
       final container = _containerWith(repository);
       await container
@@ -137,12 +140,117 @@ void main() {
       expect(state.errorMessage, 'Incorrect phone number or password.');
       expect(state.isSubmitting, isFalse);
     });
+  });
+
+  group('AuthNotifier OTP flows', () {
+    late MockAuthRepository repository;
+
+    setUp(() {
+      repository = MockAuthRepository();
+      when(() => repository.hasSession()).thenAnswer((_) async => false);
+    });
+
+    test('verifying the registration code signs the new user in', () async {
+      when(
+        () => repository.verifyOtp(
+          phoneNumber: any(named: 'phoneNumber'),
+          code: any(named: 'code'),
+        ),
+      ).thenAnswer((_) async => _user());
+
+      final container = _containerWith(repository);
+      final ok = await container
+          .read(authProvider.notifier)
+          .verifyOtp(phoneNumber: '9876543210', code: '123456');
+
+      expect(ok, isTrue);
+      expect(container.read(authProvider).status, AuthStatus.authenticated);
+    });
+
+    test('a rejected code explains the remedy without confirming the account exists',
+        () async {
+      // The server answers `invalid_otp` for a wrong code, an expired one, an
+      // exhausted one and an unknown number alike — deliberately, so the
+      // endpoint cannot be used to discover which numbers are registered. The
+      // app must not invent a more specific cause; it points at the fix.
+      when(
+        () => repository.verifyOtp(
+          phoneNumber: any(named: 'phoneNumber'),
+          code: any(named: 'code'),
+        ),
+      ).thenThrow(
+        const ApiException(
+          code: 'invalid_otp',
+          message: 'That code is incorrect or has expired.',
+          statusCode: 400,
+        ),
+      );
+
+      final container = _containerWith(repository);
+      final ok = await container
+          .read(authProvider.notifier)
+          .verifyOtp(phoneNumber: '9876543210', code: '000000');
+
+      final state = container.read(authProvider);
+      expect(ok, isFalse);
+      expect(state.status, AuthStatus.unauthenticated);
+      expect(
+        state.errorMessage,
+        'That code is incorrect or has expired. Tap resend to get a new one.',
+      );
+      expect(state.isSubmitting, isFalse);
+    });
+
+    test('a completed password reset signs the user in', () async {
+      when(
+        () => repository.resetPassword(
+          phoneNumber: any(named: 'phoneNumber'),
+          code: any(named: 'code'),
+          newPassword: any(named: 'newPassword'),
+        ),
+      ).thenAnswer((_) async => _user());
+
+      final container = _containerWith(repository);
+      final ok = await container.read(authProvider.notifier).resetPassword(
+            phoneNumber: '9876543210',
+            code: '123456',
+            newPassword: 'brand-new-pass-99',
+          );
+
+      expect(ok, isTrue);
+      expect(container.read(authProvider).status, AuthStatus.authenticated);
+    });
+
+    test('the reset purpose reaches the repository, not the registration one',
+        () async {
+      // Codes are scoped server-side: sending the wrong purpose asks for a code
+      // that will be refused when redeemed, with nothing on screen to explain it.
+      when(
+        () => repository.requestOtp(
+          phoneNumber: any(named: 'phoneNumber'),
+          purpose: any(named: 'purpose'),
+        ),
+      ).thenAnswer((_) async {});
+
+      final container = _containerWith(repository);
+      await container.read(authProvider.notifier).requestOtp(
+            phoneNumber: '9876543210',
+            purpose: OtpPurpose.passwordReset,
+          );
+
+      verify(
+        () => repository.requestOtp(
+          phoneNumber: '9876543210',
+          purpose: OtpPurpose.passwordReset,
+        ),
+      ).called(1);
+    });
 
     test('server field errors are exposed per field for inline display', () async {
       when(
-        () => repository.login(
+        () => repository.requestOtp(
           phoneNumber: any(named: 'phoneNumber'),
-          password: any(named: 'password'),
+          purpose: any(named: 'purpose'),
         ),
       ).thenThrow(
         const ApiException(
@@ -156,13 +264,59 @@ void main() {
       );
 
       final container = _containerWith(repository);
-      await container
+      final sent = await container
           .read(authProvider.notifier)
-          .login(phoneNumber: 'bad', password: 'pw');
+          .requestOtp(phoneNumber: 'bad');
 
+      expect(sent, isFalse);
       expect(
         container.read(authProvider).fieldErrors['phone_number'],
         'Enter a valid Indian mobile number.',
+      );
+    });
+
+    test('a throttled resend is reported without ending the flow', () async {
+      // The user stays on the code screen: "wait a moment", not "start again".
+      when(
+        () => repository.requestOtp(
+          phoneNumber: any(named: 'phoneNumber'),
+          purpose: any(named: 'purpose'),
+        ),
+      ).thenThrow(
+        const ApiException(
+          code: 'throttled',
+          message: 'Please wait 42 seconds before requesting another code.',
+          details: {'retry_after_seconds': 42},
+          statusCode: 429,
+        ),
+      );
+
+      final container = _containerWith(repository);
+      final sent = await container
+          .read(authProvider.notifier)
+          .requestOtp(phoneNumber: '9876543210');
+
+      final state = container.read(authProvider);
+      expect(sent, isFalse);
+      expect(state.errorMessage, contains('42 seconds'));
+      expect(state.isSubmitting, isFalse);
+    });
+  });
+
+  group('OtpPurpose wire values', () {
+    test('match the Django OtpPurpose choices exactly', () {
+      // A mismatch would be rejected server-side as a bad purpose, or worse,
+      // silently verify against the wrong code family.
+      expect(OtpPurpose.registration.wireValue, 'registration');
+      expect(OtpPurpose.passwordReset.wireValue, 'password_reset');
+    });
+
+    test('carries no passwordless-login purpose', () {
+      // Sign-in is the password. A code issued for it would be a second,
+      // weaker credential path into the same account.
+      expect(
+        OtpPurpose.values.where((p) => p.wireValue == 'login'),
+        isEmpty,
       );
     });
   });

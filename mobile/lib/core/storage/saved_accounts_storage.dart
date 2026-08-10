@@ -45,8 +45,8 @@ class SavedAccountsStorage {
       return accounts;
     } catch (error) {
       // A corrupt entry must never brick the login screen. Dropping the list
-      // costs the user one re-entry of their password; throwing here would
-      // leave them with no way in at all.
+      // costs the user one fresh code; throwing here would leave them with no
+      // way in at all.
       debugPrint('Saved accounts unreadable, discarding: $error');
       await _storage.delete(key: _key);
       return const [];
@@ -89,7 +89,7 @@ class SavedAccountsStorage {
   /// Deliberately destructive: the backend blacklists a refresh token the
   /// moment it is spent, so leaving a copy behind would guarantee a dead token
   /// in storage and a confusing failure on the next switch. Callers that fail
-  /// to complete the sign-in simply fall back to asking for the password.
+  /// to complete the sign-in simply fall back to sending a fresh code.
   Future<String?> takeToken(int userId) async {
     final account = await find(userId);
     final token = account?.refreshToken;

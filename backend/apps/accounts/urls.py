@@ -24,6 +24,8 @@ urlpatterns = [
     # --- Profile ------------------------------------------------------------
     path("me/", views.MeView.as_view(), name="me"),
     path("password/change/", views.PasswordChangeView.as_view(), name="password-change"),
+    # "Forgot password": proven by a code to the phone, not an emailed link.
+    path("password/reset/", views.PasswordResetView.as_view(), name="password-reset"),
 
     # --- 1.4 OTP ------------------------------------------------------------
     path("otp/request/", views.OtpRequestView.as_view(), name="otp-request"),
