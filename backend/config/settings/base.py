@@ -78,7 +78,8 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # must precede CommonMiddleware
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+    # WhiteNoise is NOT here on purpose — see the static files note further down
+    # and the block that installs it in prod.py.
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -246,9 +247,19 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# -----------------------------------------------------------------------------
+# WHITENOISE IS CONFIGURED IN prod.py, NOT HERE
+# -----------------------------------------------------------------------------
+# `whitenoise` is listed in requirements/prod.txt only, and Render's build runs
+# `pip install -r requirements/prod.txt`. Naming it in this file made every other
+# environment reference a package it does not have installed: dev.py coped by
+# stripping the middleware back out again, test.py did not, and the whole suite
+# died on CI with `ModuleNotFoundError: No module named 'whitenoise'` — while
+# passing on any machine that happened to have it. A base module must not name a
+# dependency base.txt does not install.
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

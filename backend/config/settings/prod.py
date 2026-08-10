@@ -39,6 +39,29 @@ SECURE_HSTS_PRELOAD = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 
+# --- Static files (WhiteNoise) ----------------------------------------------
+# Configured here because this is the only environment where it is installed:
+# `whitenoise` is in requirements/prod.txt, and render.yaml's build runs exactly
+# that file. base.py used to name it for everyone, which meant dev and test
+# referenced a package they had never installed — see the note in base.py.
+#
+# WhiteNoise requires that its middleware sit immediately after
+# SecurityMiddleware, so it is inserted by position rather than appended. Doing
+# it by index off the real list also means a future reordering of base's
+# middleware cannot silently put this in the wrong place.
+_security = MIDDLEWARE.index(  # noqa: F405
+    "django.middleware.security.SecurityMiddleware"
+)
+MIDDLEWARE = (  # noqa: F405
+    MIDDLEWARE[: _security + 1]  # noqa: F405
+    + ["whitenoise.middleware.WhiteNoiseMiddleware"]
+    + MIDDLEWARE[_security + 1 :]  # noqa: F405
+)
+
+STORAGES["staticfiles"] = {  # noqa: F405
+    "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+}
+
 # --- Media storage ----------------------------------------------------------
 # Render's filesystem is EPHEMERAL: anything written to MEDIA_ROOT disappears on
 # every deploy, restart, and wake-from-sleep. Worker profile photos and Aadhaar

@@ -17,7 +17,10 @@ ALLOWED_HOSTS = ["*"]
 # WhiteNoise is a production concern: it serves collected static files, and
 # locally that directory does not exist until collectstatic runs, which makes it
 # warn on every request. Django's own staticfiles handling covers development.
-MIDDLEWARE = [m for m in MIDDLEWARE if "whitenoise" not in m.lower()]  # noqa: F405
+#
+# Nothing to strip any more — base.py no longer adds it, and prod.py does. This
+# note stays because "why is WhiteNoise missing in development?" is the question
+# it answers.
 
 # Flutter Web dev server and the Android emulator's host alias.
 CORS_ALLOW_ALL_ORIGINS = True
