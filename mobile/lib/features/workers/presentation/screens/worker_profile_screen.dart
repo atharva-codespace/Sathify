@@ -27,7 +27,10 @@ class _WorkerProfileScreenState extends ConsumerState<WorkerProfileScreen> {
   final _experienceController = TextEditingController();
   final _bioController = TextEditingController();
   final _languagesController = TextEditingController();
-  final _rateController = TextEditingController();
+
+  /// What the platform pays for this work, as the server reported it. Shown,
+  /// never edited — see the pay section in build().
+  int? _platformRate;
 
   final Set<int> _selectedServices = {};
   TimeOfDay? _availableFrom;
@@ -46,7 +49,6 @@ class _WorkerProfileScreenState extends ConsumerState<WorkerProfileScreen> {
     _experienceController.dispose();
     _bioController.dispose();
     _languagesController.dispose();
-    _rateController.dispose();
     super.dispose();
   }
 
@@ -59,9 +61,7 @@ class _WorkerProfileScreenState extends ConsumerState<WorkerProfileScreen> {
     _experienceController.text = '${profile.yearsOfExperience}';
     _bioController.text = profile.bio;
     _languagesController.text = profile.languagesSpoken;
-    if (profile.expectedMonthlyRate != null) {
-      _rateController.text = '${profile.expectedMonthlyRate}';
-    }
+    _platformRate = profile.expectedMonthlyRate;
     _isAvailable = profile.isAvailable;
     _availableFrom = _parseTime(profile.availableFrom);
     _availableUntil = _parseTime(profile.availableUntil);
@@ -134,7 +134,9 @@ class _WorkerProfileScreenState extends ConsumerState<WorkerProfileScreen> {
       yearsOfExperience: int.tryParse(_experienceController.text.trim()) ?? 0,
       bio: _bioController.text.trim(),
       languagesSpoken: _languagesController.text.trim(),
-      expectedMonthlyRate: int.tryParse(_rateController.text.trim()),
+      // No rate: the server sets pay, and sending one would be silently
+      // dropped. Omitted rather than passed through so this screen never
+      // implies the worker had a say in the figure.
       isAvailable: _isAvailable,
       availableFrom: _availableFrom == null ? null : _wire(_availableFrom!),
       availableUntil: _availableUntil == null ? null : _wire(_availableUntil!),
@@ -277,14 +279,39 @@ class _WorkerProfileScreenState extends ConsumerState<WorkerProfileScreen> {
             decoration: const InputDecoration(hintText: 'e.g. Hindi, Marathi'),
           ),
           const SizedBox(height: 20),
-          const _Label('Expected monthly pay (optional)'),
+          const _Label('Your monthly pay'),
           const SizedBox(height: 8),
-          TextFormField(
-            controller: _rateController,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-              prefixIcon: Icon(Icons.currency_rupee),
-              helperText: 'Leaving this blank means "negotiable"',
+          // Read-only on purpose. Pay is set by Sathify at one rate for
+          // everybody, which is what stops a resident bargaining an individual
+          // helper down. Showing the figure here — rather than hiding the
+          // section — means a worker can see what they are owed.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.sm,
+              vertical: AppSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceMuted,
+              borderRadius: BorderRadius.circular(AppRadius.md),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.currency_rupee, size: AppIconSize.md),
+                const SizedBox(width: AppSpacing.xs),
+                Expanded(
+                  child: Text(
+                    _platformRate == null
+                        ? 'Shown once your profile is approved'
+                        : '$_platformRate per month',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                Text(
+                  'Set by Sathify',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 20),

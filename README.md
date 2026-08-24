@@ -80,7 +80,8 @@ sathify/
     ├── cloud-database.md          the shared Supabase database
     ├── leave-and-termination.md   Module 4.6 notice rules
     ├── manual-test-cases.md       scripted walkthroughs per module
-    └── monetisation.md
+    ├── monetisation.md
+    └── superadmin-console-and-hourly-pay.md   ops console + visit-fee billing
 ```
 
 Each Django app maps 1:1 to a Flutter feature folder and to a module in the

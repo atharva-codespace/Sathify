@@ -11,7 +11,8 @@ Design notes
   no reliable email address (Module 1.4), and a phone number is the identifier
   every user in this market already knows.
 * ``role`` drives all role-based access control. A user holds exactly one role;
-  the four roles are mutually exclusive by design.
+  the roles are mutually exclusive by design. Four belong to a society; the
+  fifth, ``SUPERADMIN``, belongs to the platform and to no society at all.
 * ``society`` is the multi-tenancy anchor read by ``SocietyScopedQuerysetMixin``.
 * ``is_approved`` gates platform access behind administrator approval
   (SRS 3.1, 3.2). Registration alone grants nothing.
@@ -29,12 +30,41 @@ from django.utils.translation import gettext_lazy as _
 
 
 class Role(models.TextChoices):
-    """The four user classes defined in SRS 2.2."""
+    """The four user classes defined in SRS 2.2, plus the platform operator.
+
+    ``SUPERADMIN`` is deliberately *not* "a society admin with more rows". Every
+    permission class below reads ``role``, so widening ``SOCIETY_ADMIN`` to reach
+    across societies would widen it for every society's own managing committee
+    at the same time. It is a separate role with a separate ``society`` (always
+    null) precisely so that the cross-society read path has exactly one entry
+    point that can be audited — see ``apps.core.platform``.
+    """
 
     RESIDENT = "resident", _("Resident")
     WORKER = "worker", _("Domestic Worker")
     GUARD = "guard", _("Security Guard")
     SOCIETY_ADMIN = "society_admin", _("Society Administrator")
+    SUPERADMIN = "superadmin", _("Platform Operator")
+
+
+#: Roles that belong to Sathify rather than to any one society. Their ``society``
+#: is null, so every society-scoped queryset naturally returns nothing for them
+#: rather than silently leaking one arbitrary society's rows.
+PLATFORM_ROLES = frozenset({Role.SUPERADMIN})
+
+
+class SuperadminLevel(models.TextChoices):
+    """What a platform operator may do, beyond reading.
+
+    Split because the two dangerous capabilities are dangerous in different
+    directions and are rarely needed by the same person on the same day.
+    Nobody holds both by default.
+    """
+
+    #: Read everything, and impersonate a society admin to fix their data.
+    SUPPORT = "support", _("Support — read and impersonate")
+    #: Read everything, refund, and confirm a settlement by hand.
+    FINANCE = "finance", _("Finance — read, refund, settle")
 
 
 # Indian mobile numbers: 10 digits beginning 6-9, optionally +91 prefixed.
@@ -75,8 +105,15 @@ class UserManager(BaseUserManager):
     def create_superuser(self, phone_number, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
-        # Platform staff are administrators and are pre-approved by definition.
-        extra_fields.setdefault("role", Role.SOCIETY_ADMIN)
+        # Platform staff are pre-approved by definition.
+        #
+        # This used to default to SOCIETY_ADMIN, which quietly made every
+        # `createsuperuser` an administrator *of no society* — a role whose
+        # every queryset filters on `society_id`, and whose society is null.
+        # Such an account reads as authorised by the permission classes and
+        # then sees nothing, which is the most confusing of the two possible
+        # failures. A platform operator now gets the role that describes them.
+        extra_fields.setdefault("role", Role.SUPERADMIN)
         extra_fields.setdefault("is_approved", True)
 
         if extra_fields.get("is_staff") is not True:
@@ -174,7 +211,7 @@ class User(AbstractUser):
             models.Index(fields=["society", "role", "is_approved"]),
         ]
         constraints = [
-            # Module 1.3 — the four roles are mutually exclusive AND exhaustive.
+            # Module 1.3 — roles are mutually exclusive AND exhaustive.
             #
             # Exclusivity comes free from `role` being a single column: there is
             # no way to hold two. Exhaustiveness does not, and that is the half
@@ -186,7 +223,19 @@ class User(AbstractUser):
             # system reasons about. Failing the write is better than storing it.
             models.CheckConstraint(
                 condition=models.Q(role__in=Role.values),
-                name="user_role_is_one_of_the_four_roles",
+                name="user_role_is_a_known_role",
+            ),
+            # A platform operator belongs to no society, and a society-scoped
+            # user must belong to one. Enforced here because the alternative —
+            # a superadmin carrying a society_id — would make every scoped
+            # queryset silently return that one society's rows and look like it
+            # was working.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(role=Role.SUPERADMIN, society__isnull=True)
+                    | ~models.Q(role=Role.SUPERADMIN)
+                ),
+                name="superadmin_belongs_to_no_society",
             ),
         ]
 
@@ -211,6 +260,23 @@ class User(AbstractUser):
     @property
     def is_society_admin(self) -> bool:
         return self.role == Role.SOCIETY_ADMIN
+
+    @property
+    def is_superadmin(self) -> bool:
+        return self.role == Role.SUPERADMIN
+
+    @property
+    def superadmin_level(self) -> str | None:
+        """Support or Finance, or None for anyone who is not platform staff.
+
+        Read through a property rather than by reaching for the profile, so a
+        missing profile is ``None`` (deny) instead of ``RelatedObjectDoesNotExist``
+        raised from inside a permission check.
+        """
+        if not self.is_superadmin:
+            return None
+        profile = getattr(self, "superadmin_profile", None)
+        return profile.level if profile else None
 
     def approve(self, approved_by=None):
         """Mark this user as approved. Idempotent."""
@@ -441,3 +507,178 @@ class DeviceSession(models.Model):
         self.revoked_reason = reason
         self.fcm_token = ""  # stop pushing to a device we just cut off
         self.save(update_fields=["revoked_at", "revoked_reason", "fcm_token"])
+
+
+# ===========================================================================
+# Platform operations — the Superadmin console
+#
+# Everything below exists because the console inverts this codebase's core
+# invariant. `SocietyScopedModel` and `SocietyScopedQuerysetMixin` are built so
+# that no request can read across societies; the console's whole purpose is to
+# do exactly that. The response is not to loosen the invariant but to give it
+# one documented exception with a name, a reason string and a log — so "who
+# looked at this resident's record, and why?" is a query rather than an
+# investigation.
+# ===========================================================================
+
+
+class SuperadminProfile(models.Model):
+    """What a platform operator is allowed to do beyond reading.
+
+    A separate row rather than a column on ``User`` so that granting Finance to
+    somebody is an explicit act against an explicit table, and so revoking it
+    leaves the account intact.
+    """
+
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="superadmin_profile",
+        limit_choices_to={"role": Role.SUPERADMIN},
+    )
+    level = models.CharField(max_length=20, choices=SuperadminLevel.choices)
+
+    #: Read-wide is granted by the role. Write-narrow is granted here, and only
+    #: Finance ever gets it: refunds and hand-confirmed settlements are the two
+    #: console actions that move money without a gateway signature behind them.
+    may_refund = models.BooleanField(default=False)
+    may_settle_manually = models.BooleanField(default=False)
+
+    granted_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="granted_superadmin_profiles",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("superadmin profile")
+        verbose_name_plural = _("superadmin profiles")
+
+    def __str__(self):
+        return f"{self.user} ({self.get_level_display()})"
+
+    def save(self, *args, **kwargs):
+        # The money capabilities follow the level rather than being set
+        # independently, so there is no way to hand somebody Support and then
+        # tick "may refund" and forget it happened.
+        self.may_refund = self.level == SuperadminLevel.FINANCE
+        self.may_settle_manually = self.level == SuperadminLevel.FINANCE
+        super().save(*args, **kwargs)
+
+
+class ImpersonationGrant(models.Model):
+    """A time-boxed, reason-gated session acting as a society's own admin.
+
+    The console is read-wide and write-narrow: a Superadmin sees everything, but
+    every mutation to a society's operational data happens *as* that society's
+    administrator, through one of these. Two consequences worth stating, because
+    they are the point rather than side effects:
+
+    * The society's own audit trail records the change against a real
+      administrator, not against an opaque platform actor. Their records stay
+      answerable to them.
+    * The grant expires on its own. An operator who forgets to close a session
+      loses it anyway, which is the failure mode you want when the alternative
+      is a permanent cross-tenant write capability sitting open in a browser tab.
+    """
+
+    DEFAULT_MINUTES = 30
+
+    superadmin = models.ForeignKey(
+        "accounts.User", on_delete=models.CASCADE, related_name="impersonation_grants",
+        limit_choices_to={"role": Role.SUPERADMIN},
+    )
+    target = models.ForeignKey(
+        "accounts.User", on_delete=models.CASCADE, related_name="impersonated_by_grants"
+    )
+    society = models.ForeignKey(
+        "societies.Society", on_delete=models.CASCADE, related_name="impersonation_grants"
+    )
+
+    #: Never blank. A grant without a stated purpose is the thing this model
+    #: exists to make impossible, so it is required at the database level too.
+    reason = models.CharField(max_length=300)
+
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    reads = models.PositiveIntegerField(default=0)
+    writes = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = _("impersonation grant")
+        verbose_name_plural = _("impersonation grants")
+        ordering = ["-started_at"]
+        indexes = [models.Index(fields=["society", "-started_at"])]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(reason=""),
+                name="impersonation_requires_a_reason",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.superadmin} as {self.target} ({self.reason[:40]})"
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = self.started_at + timedelta(minutes=self.DEFAULT_MINUTES)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_live(self) -> bool:
+        return self.ended_at is None and self.expires_at > timezone.now()
+
+    def end(self) -> bool:
+        """Close the session. Idempotent."""
+        if self.ended_at is not None:
+            return False
+        self.ended_at = timezone.now()
+        self.save(update_fields=["ended_at"])
+        return True
+
+
+class PlatformAccessLog(models.Model):
+    """One row per cross-society read that touched resident or worker PII.
+
+    Written by ``apps.core.platform.PlatformScoped``, never by hand. The
+    society FK is what makes §9.4d possible: a society can be shown when
+    platform staff read its people's records, and why. Being watchable is the
+    price of holding the bypass at all — a capability nobody can audit is one
+    the committee has to take on trust, and this codebase does not ask them to.
+    """
+
+    superadmin = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True,
+        related_name="platform_access_logs",
+    )
+    society = models.ForeignKey(
+        "societies.Society", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="platform_access_logs",
+        help_text=_("Null when the read genuinely spanned every society."),
+    )
+
+    model_label = models.CharField(max_length=100, db_index=True)
+    action = models.CharField(max_length=40, default="read")
+    reason = models.CharField(max_length=300, blank=True)
+    row_count = models.PositiveIntegerField(default=0)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = _("platform access log")
+        verbose_name_plural = _("platform access logs")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["society", "-created_at"]),
+            models.Index(fields=["superadmin", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.superadmin} read {self.model_label} ({self.row_count} rows)"

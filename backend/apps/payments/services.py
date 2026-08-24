@@ -842,15 +842,45 @@ def split_for_replacement(engagement, *, day_rate_paise: int) -> tuple[int, int]
     return split.split(day_rate_paise)
 
 
-def daily_rate_paise(engagement) -> int:
-    """A single day's share of a monthly rate.
+def daily_rate_paise(engagement, day: dt.date | None = None) -> int:
+    """What one day of this engagement is worth, under either rate basis.
 
-    Divided by the visits actually scheduled in a month rather than by 30: a
-    worker who comes twice a week is not paid a thirtieth of their month for one
-    visit.
+    Called by leave settlement (Module 4.6) and by the replacement split (8.5),
+    neither of which should have to learn that hourly terms exist. One function,
+    two branches, so both keep working when an engagement opts into hourly.
+
+    The hourly branch **includes the visit fee**, and that is not a detail: a
+    replacement worker covering a single day travels exactly as far as the
+    regular worker would have. Paying her only for the hours would hand her the
+    precise unfairness the visit fee was introduced to remove — a short covering
+    shift at a poor effective rate — and it would do it to whoever was standing
+    in at short notice.
+
+    ``day`` is only consulted on hourly terms, where a day's worth depends on
+    what was scheduled for it. It defaults to today, which is what every
+    same-day caller (a leave request, a replacement) actually means.
     """
-    per_month = max(1, len(engagement.days_of_week) * 4)
-    return rupees_to_paise(engagement.monthly_rate) // per_month
+    from apps.hiring.models import RateBasis
+
+    if engagement.rate_basis != RateBasis.HOURLY:
+        # Divided by the visits actually scheduled in a month rather than by 30:
+        # a worker who comes twice a week is not paid a thirtieth of their month
+        # for one visit.
+        per_month = max(1, len(engagement.days_of_week) * 4)
+        return rupees_to_paise(engagement.monthly_rate) // per_month
+
+    from .hourly import session_paise
+
+    day = day or timezone.localdate()
+    minutes = engagement.scheduled_minutes_on(day)
+    if not minutes:
+        # Nothing was scheduled that day, so no hours are owed — but if somebody
+        # is asking what the day is worth, a visit is contemplated, and a visit
+        # costs her the journey either way.
+        return rupees_to_paise(engagement.visit_fee)
+
+    rate = rupees_to_paise(engagement.hourly_rate)
+    return session_paise(minutes, rate) + rupees_to_paise(engagement.visit_fee)
 
 
 __all__ = [

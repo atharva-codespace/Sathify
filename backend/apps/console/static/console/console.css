@@ -1,0 +1,276 @@
+/*
+ * The Superadmin console.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TOKENS ARE THE FLUTTER APP'S, PORTED
+ * ---------------------------------------------------------------------------
+ * Every value below is copied from `mobile/lib/core/theme/app_tokens.dart` —
+ * the same palette, the same 4pt spacing grid, the same radii and shadows. The
+ * console and the apps are one product and a resident who sees a screenshot of
+ * either should recognise the other.
+ *
+ * Copying rather than sharing is a real cost: two files can drift. It is the
+ * cheaper cost here, because the alternative is a build step to compile Dart
+ * tokens into CSS, and this project has no JS toolchain at all (see
+ * `docs/free-tier-constraints.md`). If the palette moves, it moves here too.
+ *
+ * ---------------------------------------------------------------------------
+ * NO FRAMEWORK, NO BUILD
+ * ---------------------------------------------------------------------------
+ * Plain CSS and plain JS, served by the existing Django web service through
+ * WhiteNoise. There is one free web service on this plan and no place to run a
+ * Node build, so a console that needed `npm run build` would be a console
+ * nobody could deploy.
+ */
+
+:root {
+  /* Brand — rationed to primary actions and the active nav tab. */
+  --primary: #1B6B50;
+  --primary-dark: #0F4A36;
+  --primary-soft: #E7F1EC;
+  --accent: #F2A61C;
+  --accent-soft: #FDF3E0;
+
+  /* Ground */
+  --bg: #F7F8F6;
+  --surface: #FFFFFF;
+  --surface-muted: #F0F2EF;
+  --border: #E5E8E4;
+  --border-strong: #D3D8D2;
+
+  /* Text */
+  --ink: #14201C;
+  --ink-2: #5C6661;
+  --ink-3: #868F8A;
+  --on-primary: #FFFFFF;
+
+  /* Semantic — never the accent. Status colour and brand colour must not be
+     confused, which is the rule the Flutter tokens state explicitly. */
+  --success: #2E7D32;  --success-soft: #E8F3E9;
+  --warning: #B5730F;  --warning-soft: #FBF1E1;
+  --danger:  #C0392B;  --danger-soft:  #FAEBE9;
+  --info:    #0277BD;  --info-soft:    #E5F1F8;
+
+  /* 4pt grid */
+  --xxs: 4px; --xs: 8px; --sm: 12px; --md: 16px;
+  --lg: 20px; --xl: 24px; --xxl: 32px;
+
+  --r-chip: 8px; --r-btn: 12px; --r-card: 16px; --r-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(20,32,28,.04), 0 12px 24px -12px rgba(20,32,28,.06);
+  --shadow-md: 0 2px 4px rgba(20,32,28,.05), 0 24px 40px -24px rgba(20,32,28,.10);
+
+  --sidebar-w: 232px;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.noscript {
+  margin: var(--xxl) auto; max-width: 560px; padding: var(--lg);
+  background: var(--warning-soft); border: 1px solid var(--border);
+  border-radius: var(--r-card);
+}
+
+/* --- shell ---------------------------------------------------------------- */
+
+#app { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 100vh; }
+
+.sidebar {
+  background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: var(--lg) 0;
+  position: sticky; top: 0; height: 100vh;
+}
+.brand { padding: 0 var(--lg) var(--lg); }
+.brand-name { font-family: var(--mono); font-weight: 700; letter-spacing: .12em; font-size: 13px; }
+.brand-sub { color: var(--ink-3); font-size: 12px; }
+
+#nav { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--sm); flex: 1; }
+#nav button {
+  all: unset; cursor: pointer; padding: var(--xs) var(--sm);
+  border-radius: var(--r-btn); color: var(--ink-2); font-size: 14px;
+}
+#nav button:hover { background: var(--surface-muted); }
+#nav button[aria-current="page"] { background: var(--primary-soft); color: var(--primary-dark); font-weight: 600; }
+#nav button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.sidebar-foot { padding: var(--md) var(--lg) 0; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-3); }
+.link-btn { all: unset; cursor: pointer; color: var(--primary); font-size: 12px; }
+.link-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.topbar {
+  display: flex; align-items: center; gap: var(--md);
+  padding: var(--sm) var(--xl); background: var(--surface);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5;
+}
+.topbar input[type="search"] {
+  flex: 1; max-width: 480px; padding: var(--xs) var(--sm);
+  border: 1px solid var(--border-strong); border-radius: var(--r-btn);
+  font: inherit; background: var(--bg);
+}
+.topbar input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.screen { padding: var(--xl); max-width: 1400px; }
+
+/* --- type ----------------------------------------------------------------- */
+
+h1 { font-size: 20px; margin: 0 0 var(--xs); letter-spacing: -.01em; }
+h2 { font-size: 15px; margin: var(--xl) 0 var(--xs); }
+.eyebrow {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 var(--xxs);
+}
+.muted { color: var(--ink-2); }
+.small { font-size: 12px; }
+.error { color: var(--danger); }
+
+/* --- cards and tiles ------------------------------------------------------ */
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-card); padding: var(--md); box-shadow: var(--shadow-sm);
+}
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--md); }
+.tile .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .label { font-size: 12px; color: var(--ink-2); }
+
+/*
+ * The one piece of chrome that earns its space. Revenue and GMV sit side by
+ * side and are never summed — wages are not income, and a console that showed
+ * a combined total would point the whole company at the number it does not
+ * earn.
+ */
+.not-additive {
+  grid-column: 1 / span 2; font-size: 11px; color: var(--ink-3);
+  margin-top: calc(-1 * var(--xs)); font-family: var(--mono);
+}
+
+/* --- chips ---------------------------------------------------------------- */
+
+.chip {
+  display: inline-block; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-chip); white-space: nowrap;
+  background: var(--surface-muted); color: var(--ink-2);
+}
+.chip.ok   { background: var(--success-soft); color: var(--success); }
+.chip.warn { background: var(--warning-soft); color: var(--warning); }
+.chip.crit { background: var(--danger-soft);  color: var(--danger); }
+.chip.info { background: var(--info-soft);    color: var(--info); }
+
+/* --- tables --------------------------------------------------------------- */
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: var(--xs) var(--sm); border-bottom: 1px solid var(--border); vertical-align: top; }
+th {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3); background: var(--surface-muted);
+  white-space: nowrap; position: sticky; top: 0;
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr.clickable { cursor: pointer; }
+tbody tr.clickable:hover { background: var(--surface-muted); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mono { font-family: var(--mono); font-size: 12px; }
+
+/* --- controls ------------------------------------------------------------- */
+
+.btn {
+  all: unset; cursor: pointer; padding: var(--xs) var(--md);
+  border-radius: var(--r-btn); font-size: 13px; font-weight: 600;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink);
+  text-align: center;
+}
+.btn:hover { background: var(--surface-muted); }
+.btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.btn.primary:hover { background: var(--primary-dark); }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.btn.small { padding: 2px var(--xs); font-size: 12px; }
+
+.filters { display: flex; flex-wrap: wrap; gap: var(--xs); align-items: center; margin-bottom: var(--sm); }
+.filters select, .filters input {
+  padding: 6px var(--xs); border: 1px solid var(--border-strong);
+  border-radius: var(--r-btn); font: inherit; font-size: 13px; background: var(--surface);
+}
+label.field { display: flex; flex-direction: column; gap: var(--xxs); font-size: 12px; color: var(--ink-2); }
+
+/* --- states --------------------------------------------------------------- */
+
+.state { padding: var(--xxl); text-align: center; color: var(--ink-2); }
+.state h3 { margin: 0 0 var(--xxs); color: var(--ink); font-size: 15px; }
+
+.skeleton { display: grid; gap: var(--xs); }
+.skeleton div {
+  height: 40px; border-radius: var(--r-chip);
+  background: linear-gradient(90deg, var(--surface-muted) 25%, #E8EBE7 37%, var(--surface-muted) 63%);
+  background-size: 400% 100%; animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+@media (prefers-reduced-motion: reduce) { .skeleton div { animation: none; } }
+
+.queue { display: grid; gap: var(--xs); }
+.queue-row {
+  display: grid; grid-template-columns: 84px 1fr auto; gap: var(--sm);
+  align-items: center; padding: var(--sm); border: 1px solid var(--border);
+  border-radius: var(--r-card); background: var(--surface);
+}
+.queue-row.critical { border-left: 3px solid var(--danger); }
+.queue-row.warning  { border-left: 3px solid var(--warning); }
+
+.bar { height: 6px; background: var(--surface-muted); border-radius: var(--r-pill); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--primary); }
+
+/* --- drawer --------------------------------------------------------------- */
+
+.drawer-backdrop { position: fixed; inset: 0; background: rgba(20,32,28,.28); z-index: 20; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 92vw);
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-md); z-index: 21; overflow-y: auto; padding: var(--lg);
+}
+.drawer h2 { margin-top: 0; }
+.drawer .row { display: flex; gap: var(--sm); padding: 6px 0; border-bottom: 1px solid var(--border); }
+.drawer .row span:first-child { color: var(--ink-2); width: 150px; flex: none; }
+
+/* Testimony, not evidence. A UPI settlement rests on a person's word against a
+   bank statement; a signed one rests on an HMAC. The console must not let those
+   two look the same. */
+.assertion {
+  background: var(--warning-soft); border: 1px solid var(--warning);
+  border-radius: var(--r-chip); padding: var(--sm); margin: var(--sm) 0;
+}
+
+.toast {
+  position: fixed; bottom: var(--lg); left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: #fff; padding: var(--xs) var(--md);
+  border-radius: var(--r-btn); z-index: 30; box-shadow: var(--shadow-md); font-size: 13px;
+}
+.toast.bad { background: var(--danger); }
+
+/* --- login ---------------------------------------------------------------- */
+
+.login { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
+.login-card {
+  width: 360px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-card); padding: var(--xl); box-shadow: var(--shadow-md);
+  display: grid; gap: var(--sm);
+}
+.login-card label { display: grid; gap: var(--xxs); font-size: 12px; color: var(--ink-2); }
+.login-card input {
+  padding: var(--xs) var(--sm); border: 1px solid var(--border-strong);
+  border-radius: var(--r-btn); font: inherit;
+}

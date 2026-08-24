@@ -353,3 +353,254 @@ class RegisterScan(SocietyScopedModel, TimeStampedModel):
             update_fields=["transcribed", "transcribed_at", "transcribed_by", "updated_at"]
         )
         return True
+
+
+# ===========================================================================
+# Module 7.7 — Work sessions
+#
+# THE GATE LOG CANNOT BILL BY THE HOUR, AND THIS IS WHY
+#
+# A worker enters Palm Grove at 07:02 and leaves at 13:40. In between she worked
+# four flats. The gate holds exactly two AttendanceEvents for that. Dividing them
+# into four billable spans is not a rounding problem — the data is not there.
+#
+# ``AttendanceEvent.engagement`` half-anticipates this: it is nullable, and is
+# matched within VISIT_MATCH_WINDOW_MINUTES (two hours) because "a worker who
+# turns up an hour early is still coming for the 9am job". That generosity is
+# right for deciding whether to open a gate and useless for deciding what to
+# pay: an event within two hours of three scheduled visits gives three equally
+# good answers.
+#
+# So billing reads WorkSession, one row per (engagement, day), and the gate log
+# stays what it always was — the society's access record, and the evidence a
+# disputed session is checked against. It is never the billing source.
+# ===========================================================================
+
+
+class SessionSource(models.TextChoices):
+    """How a session's boundaries were captured, in descending trust.
+
+    Mirrors the fallback ladder ``VerificationMethod`` already encodes, and is
+    stored on every row because it is both a platform-health metric and the
+    first thing anyone should look at when a session is disputed.
+    """
+
+    #: Tier 1 — she tapped Start in the app, inside the society geofence.
+    SELF = "self", _("Worker's own phone, geofenced")
+    #: Tier 2 — the resident scanned her printed card at their door. The
+    #: strongest signal available: both parties present, no network needed.
+    RESIDENT_SCAN = "resident_scan", _("Resident scanned her card")
+    #: Tier 3 — she started, the geofence failed, the resident confirmed a push.
+    RESIDENT_CONFIRM = "resident_confirm", _("Resident approved a prompt")
+    #: Tier 4 — inferred from gate events, and ONLY when exactly one engagement
+    #: was plausible in the window. Never when the match is ambiguous.
+    DERIVED = "derived", _("Derived from gate events")
+    #: Tier 5 — a society administrator typed it in, with a reason.
+    MANUAL = "manual", _("Entered by an administrator")
+
+
+#: Trust tier per source, 1 (best) to 5. A table rather than an ordering on the
+#: choices, so "what fraction of this society's sessions came from a trustworthy
+#: capture?" has one lookup and one answer.
+SOURCE_TIER = {
+    SessionSource.SELF: 1,
+    SessionSource.RESIDENT_SCAN: 2,
+    SessionSource.RESIDENT_CONFIRM: 3,
+    SessionSource.DERIVED: 4,
+    SessionSource.MANUAL: 5,
+}
+
+#: Tiers a society must predominantly be producing before hourly billing can be
+#: trusted there. Below this, a wage figure rests on inference.
+TRUSTED_TIERS = frozenset({1, 2})
+
+
+class SessionStatus(models.TextChoices):
+    OPEN = "open", _("She is working now")
+    CLOSED = "closed", _("Finished normally")
+    #: Closed by the nightly job at the expected departure, because nobody
+    #: tapped Stop. Billed at scheduled hours, never open-ended.
+    AUTO_CLOSED = "auto_closed", _("Closed automatically, needs a look")
+    #: The resident cancelled at the door. The visit fee is owed; no hours are.
+    CANCELLED_AT_DOOR = "cancelled_at_door", _("Cancelled after she arrived")
+    #: She did not come and had no approved leave. Nothing is owed.
+    NO_SHOW = "no_show", _("Did not attend")
+
+
+class WorkSessionQuerySet(models.QuerySet):
+    def open_sessions(self):
+        return self.filter(status=SessionStatus.OPEN)
+
+    def billable(self):
+        """Sessions that can produce an invoice line.
+
+        A no-show cannot. Everything else can, including a door cancellation,
+        which owes the visit fee precisely because she travelled.
+        """
+        return self.exclude(status=SessionStatus.NO_SHOW)
+
+    def needing_review(self):
+        return self.filter(needs_review=True)
+
+    def for_period(self, start: dt.date, end: dt.date):
+        return self.filter(visit_date__gte=start, visit_date__lte=end)
+
+    def trusted(self):
+        sources = [s for s, tier in SOURCE_TIER.items() if tier in TRUSTED_TIERS]
+        return self.filter(source__in=sources)
+
+
+class WorkSession(UUIDPrimaryKeyModel, SocietyScopedModel, TimeStampedModel):
+    """One engagement's work on one day: when she started, when she stopped.
+
+    The primary key is client-generated for the same reason ``AttendanceEvent``'s
+    is: she taps Start in a stairwell with no signal, the row must exist before
+    the server has heard of it, and replaying the queued write on reconnect must
+    not create a second session.
+    """
+
+    engagement = models.ForeignKey(
+        "hiring.Engagement", on_delete=models.PROTECT, related_name="work_sessions"
+    )
+    worker = models.ForeignKey(
+        "workers.WorkerProfile", on_delete=models.PROTECT, related_name="work_sessions"
+    )
+    visit_date = models.DateField(db_index=True)
+
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    source = models.CharField(max_length=20, choices=SessionSource.choices)
+    status = models.CharField(
+        max_length=20,
+        choices=SessionStatus.choices,
+        default=SessionStatus.OPEN,
+        db_default=SessionStatus.OPEN,
+        db_index=True,
+    )
+
+    opened_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="opened_work_sessions",
+    )
+    closed_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="closed_work_sessions",
+    )
+
+    #: Corroboration, never the source. Linking a session to the gate entry that
+    #: probably belongs to it is useful in a dispute and is not evidence on its
+    #: own — see the section header above.
+    entry_event = models.ForeignKey(
+        "attendance.AttendanceEvent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="opened_sessions",
+    )
+
+    #: Minutes of overtime the RESIDENT approved, before they were worked. Extra
+    #: time beyond this is recorded in ``unbilled_extra_minutes`` and shown to
+    #: both parties, but never charged.
+    approved_ot_minutes = models.PositiveSmallIntegerField(default=0, db_default=0)
+
+    needs_review = models.BooleanField(default=False, db_default=False, db_index=True)
+    review_note = models.CharField(max_length=300, blank=True, db_default="")
+
+    # --- Frozen pricing -----------------------------------------------------
+    # Computed once at close and stored, never recomputed on read. A resident
+    # opening a session from six weeks ago must see the arithmetic that was
+    # actually applied, even if the society has since changed its rounding rule.
+    priced_at = models.DateTimeField(null=True, blank=True)
+    billable_minutes = models.PositiveIntegerField(default=0, db_default=0)
+    overtime_minutes = models.PositiveIntegerField(default=0, db_default=0)
+    unbilled_extra_minutes = models.PositiveIntegerField(default=0, db_default=0)
+    time_paise = models.PositiveIntegerField(default=0, db_default=0)
+    overtime_paise = models.PositiveIntegerField(default=0, db_default=0)
+    visit_fee_paise = models.PositiveIntegerField(default=0, db_default=0)
+
+    objects = WorkSessionQuerySet.as_manager()
+
+    class Meta:
+        verbose_name = _("work session")
+        verbose_name_plural = _("work sessions")
+        ordering = ["-visit_date", "-started_at"]
+        constraints = [
+            # One session per engagement per day. The client-generated UUID stops
+            # a replayed sync creating a duplicate; this stops two capture tiers
+            # racing to open the same day from opposite ends — her phone in the
+            # stairwell and the resident's scan at the door.
+            models.UniqueConstraint(
+                fields=["engagement", "visit_date"],
+                name="one_session_per_engagement_day",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["worker", "-visit_date"]),
+            models.Index(fields=["society", "-visit_date"]),
+            models.Index(fields=["status", "-visit_date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.worker} at engagement {self.engagement_id} on {self.visit_date}"
+
+    # -- derived state -------------------------------------------------------
+
+    @property
+    def tier(self) -> int:
+        return SOURCE_TIER.get(self.source, 5)
+
+    @property
+    def is_trusted_capture(self) -> bool:
+        return self.tier in TRUSTED_TIERS
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == SessionStatus.OPEN
+
+    @property
+    def worked_minutes(self) -> int:
+        """Wall-clock minutes between start and stop. Not what is billed."""
+        if not (self.started_at and self.ended_at):
+            return 0
+        return max(0, int((self.ended_at - self.started_at).total_seconds() // 60))
+
+    @property
+    def total_paise(self) -> int:
+        return self.time_paise + self.overtime_paise + self.visit_fee_paise
+
+    # -- transitions ---------------------------------------------------------
+
+    def close(self, *, at=None, by=None, auto: bool = False) -> bool:
+        """Stop the session. Idempotent; returns False if it was already closed.
+
+        Pricing is deliberately NOT done here. ``payments.hourly.price_session``
+        owns that, so this model need not import the billing engine and the
+        engine can be exercised without touching a database.
+        """
+        if self.status != SessionStatus.OPEN:
+            return False
+
+        self.ended_at = at or timezone.now()
+        self.closed_by = by
+        if auto:
+            self.status = SessionStatus.AUTO_CLOSED
+            self.needs_review = True
+            self.review_note = self.review_note or (
+                "Nobody tapped Stop. Closed at the scheduled departure time."
+            )
+        else:
+            self.status = SessionStatus.CLOSED
+        self.save(
+            update_fields=[
+                "ended_at", "closed_by", "status", "needs_review",
+                "review_note", "updated_at",
+            ]
+        )
+        return True
+
+    def flag_for_review(self, note: str = "") -> bool:
+        """Mark this session as needing a human look. Idempotent."""
+        if self.needs_review:
+            return False
+        self.needs_review = True
+        self.review_note = note[:300]
+        self.save(update_fields=["needs_review", "review_note", "updated_at"])
+        return True

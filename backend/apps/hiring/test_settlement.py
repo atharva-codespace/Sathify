@@ -167,12 +167,29 @@ class TestTheDenominator:
     visible if the policy is ever revisited.
     """
 
+    # ``on=`` is passed on every call below, and that is the point rather than
+    # boilerplate.
+    #
+    # `worked_days_in` presumes a scheduled day was worked when no record
+    # contradicts it, bounded by `min(month_end, today)` — deliberate behaviour,
+    # documented in `settlement.py`, and what makes a mid-month payslip honest.
+    # A test that works the first N days and then asks for the settlement *as of
+    # the real today* is therefore asserting on N worked days plus however many
+    # scheduled days happen to sit between N and whenever the suite is run.
+    #
+    # That made two of these three tests pass only on certain dates: the
+    # ten-day case failed from the 11th of any month, and the half-month case
+    # from the 16th. Pinning the date the production function already accepts
+    # removes the dependency without weakening a single assertion — each test
+    # now asserts exactly what its name claims, on every day of the year.
+
     def test_a_full_calendar_month_worked_pays_the_full_rate(self, engagement):
         """Every day of the month worked settles the whole month."""
         days_in_month = _month_end().day
-        _work(engagement, *_every_day_this_month(days_in_month))
+        worked = _every_day_this_month(days_in_month)
+        _work(engagement, *worked)
 
-        breakdown = settlement_due(engagement)
+        breakdown = settlement_due(engagement, on=worked[-1])
 
         assert breakdown.days_worked == days_in_month
         assert breakdown.days_in_month == days_in_month
@@ -181,9 +198,10 @@ class TestTheDenominator:
     def test_half_the_month_pays_half_the_rate(self, engagement):
         days_in_month = _month_end().day
         half = days_in_month // 2
-        _work(engagement, *_every_day_this_month(half))
+        worked = _every_day_this_month(half)
+        _work(engagement, *worked)
 
-        breakdown = settlement_due(engagement)
+        breakdown = settlement_due(engagement, on=worked[-1])
 
         assert breakdown.days_worked == half
         assert breakdown.amount_paise == (
@@ -196,13 +214,32 @@ class TestTheDenominator:
         ``scheduled_days`` is still reported — it is what makes the figure
         legible in the breakdown — but it divides nothing.
         """
-        _work(engagement, *_every_day_this_month(10))
-        breakdown = settlement_due(engagement)
+        worked = _every_day_this_month(10)
+        _work(engagement, *worked)
+        breakdown = settlement_due(engagement, on=worked[-1])
 
+        assert breakdown.days_worked == 10
         assert breakdown.days_in_month == _month_end().day
         assert breakdown.amount_paise == (
             breakdown.monthly_rate_paise * 10 // breakdown.days_in_month
         )
+
+    def test_presumption_still_fills_the_gap_to_today(self, engagement):
+        """The behaviour the three tests above deliberately pin away from.
+
+        Without this, pinning ``on=`` would look like a way of hiding the
+        presumption rather than isolating it — and the next person to read the
+        class would have no way to tell which it was.
+        """
+        worked = _every_day_this_month(10)
+        _work(engagement, *worked)
+
+        later = worked[-1] + dt.timedelta(days=4)
+        breakdown = settlement_due(engagement, on=later)
+
+        assert breakdown.attended_days == 10
+        assert breakdown.presumed_days > 0
+        assert breakdown.days_worked > 10
         # Present, and different — the two are not interchangeable.
         assert breakdown.scheduled_days != breakdown.days_in_month
 

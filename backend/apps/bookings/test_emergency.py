@@ -408,9 +408,16 @@ class TestAnsweringFromTheDashboard:
         assert booking.is_actionable
 
     def test_the_grace_does_run_out(
-        self, authenticated_client, resident, society, emergency_category, maids
+        self, authenticated_client, resident, society, emergency_category, maids,
+        midday_clock,
     ):
-        """An hour later nobody should still believe somebody might turn up."""
+        """An hour later nobody should still believe somebody might turn up.
+
+        ``midday_clock`` because this needs ninety minutes to have *elapsed*,
+        and near midnight `_soon_but_still_today` can only offer a few — it
+        clamps to keep the date, which silently puts the booking back inside the
+        grace window this test exists to see it leave.
+        """
         booking = _directed_emergency(
             resident, society, emergency_category, minutes_from_now=-90
         )
@@ -442,7 +449,8 @@ class TestAnsweringFromTheDashboard:
         assert booking.status == BookingStatus.EXPIRED
 
     def test_a_lapsed_request_stops_offering_the_button(
-        self, authenticated_client, resident, society, emergency_category, maids
+        self, authenticated_client, resident, society, emergency_category, maids,
+        midday_clock,
     ):
         """The other half of the fix. A card that keeps saying "awaiting your
         confirmation" with a button that always fails is no better than one with

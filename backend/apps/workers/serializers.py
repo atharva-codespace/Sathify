@@ -105,13 +105,16 @@ class WorkerProfileWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WorkerProfile
+        # ``expected_monthly_rate`` is absent on purpose. The platform quotes one
+        # rate (apps.core.pricing), so there is nothing here for a worker to set;
+        # the column keeps its value from the model default and stays readable
+        # through WorkerProfileSerializer.
         fields = [
             "photo",
             "service_types",
             "years_of_experience",
             "bio",
             "languages_spoken",
-            "expected_monthly_rate",
             "is_available",
             "available_from",
             "available_until",

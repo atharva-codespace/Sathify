@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.accounts.models import Role
+from apps.core.pricing import MAID_DAY_CATEGORY_SLUG, MAID_DAY_RATE_INR
 from apps.bookings.models import (
     Booking,
     BookingStatus,
@@ -43,6 +44,12 @@ def cleaning_category(db):
 @pytest.fixture
 def emergency_category(db):
     return ServiceCategory.objects.get(slug="emergency-assistance")
+
+
+@pytest.fixture
+def maid_day_category(db):
+    """Seeded by migration 0005; the one category the platform prices itself."""
+    return ServiceCategory.objects.get(slug=MAID_DAY_CATEGORY_SLUG)
 
 
 @pytest.fixture
@@ -572,6 +579,62 @@ class TestCreateBooking:
         booking = Booking.objects.get()
         assert booking.expected_duration_minutes == cleaning_category.expected_duration_minutes
         assert booking.quoted_price == cleaning_category.price_min
+
+    def test_maid_day_hire_is_priced_by_the_platform(
+        self, authenticated_client, resident, resident_user,
+        available_worker, maid_day_category, booking_date,
+    ):
+        """A day's help costs what the price list says, with no quote sent."""
+        payload = booking_payload(available_worker, maid_day_category, booking_date)
+        payload.pop("quoted_price")
+
+        response = authenticated_client(resident_user).post(
+            reverse(self.URL), payload, format="json"
+        )
+
+        assert response.status_code == 201
+        assert Booking.objects.get().quoted_price == MAID_DAY_RATE_INR
+
+    def test_maid_day_hire_refuses_a_different_quote(
+        self, authenticated_client, resident, resident_user,
+        available_worker, maid_day_category, booking_date,
+    ):
+        """Refused outright, not silently corrected.
+
+        A resident who believes they booked at their own figure has to be told
+        they did not; overwriting the number would let them find out at payment.
+        """
+        response = authenticated_client(resident_user).post(
+            reverse(self.URL),
+            booking_payload(
+                available_worker, maid_day_category, booking_date, quoted_price=90
+            ),
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert "quoted_price" in response.data["error"]["details"]
+        assert Booking.objects.count() == 0
+
+    def test_specialist_categories_keep_their_own_prices(
+        self, authenticated_client, resident, resident_user,
+        available_worker, cleaning_category, booking_date,
+    ):
+        """The day rate is scoped to maid hire and must not leak elsewhere.
+
+        Deep cleaning is a different job at a different price, and an agreed
+        quote for it is still the resident's and worker's to make.
+        """
+        response = authenticated_client(resident_user).post(
+            reverse(self.URL),
+            booking_payload(
+                available_worker, cleaning_category, booking_date, quoted_price=2600
+            ),
+            format="json",
+        )
+
+        assert response.status_code == 201
+        assert Booking.objects.get().quoted_price == 2600
 
     def test_non_primary_resident_is_refused(
         self, authenticated_client, resident, resident_user,

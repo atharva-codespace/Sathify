@@ -385,19 +385,15 @@ class _Brandmark extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Container(
+        // Drawn straight, with no tinted plate behind it: the artwork is green
+        // on transparency, so sitting it on AppColors.primary would bury the
+        // mark in its own colour.
+        Image.asset(
+          'assets/images/sathify_logo.png',
           width: 64,
           height: 64,
-          decoration: BoxDecoration(
-            color: AppColors.primary,
-            borderRadius: BorderRadius.circular(AppRadius.lg),
-            boxShadow: AppShadow.md,
-          ),
-          child: const Icon(
-            Icons.verified_user_rounded,
-            size: 34,
-            color: AppColors.textOnPrimary,
-          ),
+          fit: BoxFit.contain,
+          semanticLabel: 'Sathify',
         ),
         const SizedBox(height: AppSpacing.sm),
         Text(
@@ -420,10 +416,11 @@ class _Heading extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Text(
           returning ? 'Welcome back' : 'Sign in to continue',
+          textAlign: TextAlign.center,
           style: theme.textTheme.headlineMedium,
         ),
         const SizedBox(height: AppSpacing.xxs),
@@ -433,6 +430,7 @@ class _Heading extends StatelessWidget {
                   ? 'Tap your account to continue.'
                   : 'Choose an account to continue.')
               : 'Your society, your workers, in one place.',
+          textAlign: TextAlign.center,
           style: theme.textTheme.bodyMedium,
         ),
       ],

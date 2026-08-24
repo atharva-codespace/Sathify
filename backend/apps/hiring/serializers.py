@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from apps.core.pricing import MAID_MONTHLY_RATE_INR
 from apps.workers.models import WorkerProfile
 
 # ServiceType is Module 3's model, so its projection lives with it. Imported
@@ -165,7 +166,12 @@ class _RecurringTermsFields(serializers.Serializer):
     )
     start_time = serializers.TimeField()
     expected_duration_minutes = serializers.IntegerField(min_value=15, max_value=720)
-    monthly_rate = serializers.IntegerField(min_value=1)
+
+    # Reported, never accepted. Sathify quotes one rate for everybody, so a
+    # figure sent by a client is not a negotiation — it is either a stale app
+    # or somebody trying to underpay. Either way the server's number wins, and
+    # it is injected in validate() rather than trusted from the payload.
+    monthly_rate = serializers.IntegerField(read_only=True)
 
     def validate_days_of_week(self, value):
         # Reuse the model validator so the API and the database agree on what a
@@ -275,6 +281,11 @@ class HireRequestCreateSerializer(_RecurringTermsFields, serializers.ModelSerial
             raise serializers.ValidationError(
                 {"worker": "You already have a running engagement with this worker."}
             )
+
+        # The platform rate, stamped on at the moment of asking. Copied onto the
+        # Engagement verbatim when the worker accepts, so a later change to the
+        # constant never re-prices an agreement somebody already said yes to.
+        attrs["monthly_rate"] = MAID_MONTHLY_RATE_INR
 
         return attrs
 
