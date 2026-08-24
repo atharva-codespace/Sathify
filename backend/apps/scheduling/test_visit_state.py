@@ -177,9 +177,16 @@ class TestWhatTheGateContributes:
         assert today_item(worker).visit_status == VisitStatus.PENDING
 
     def test_passing_the_gate_twice_reports_the_earliest_arrival(
-        self, engagement, worker, society
+        self, engagement, worker, society, midday_clock
     ):
-        """Somebody who stepped out and back arrived once."""
+        """Somebody who stepped out and back arrived once.
+
+        ``midday_clock`` because "two hours ago" is yesterday when the suite
+        runs before 02:00, and an event on yesterday's date is not part of the
+        day `today_item` reads — so the earliest arrival would drop out of the
+        comparison entirely and the test would fail for the calendar rather than
+        for the code.
+        """
         first = timezone.now() - dt.timedelta(hours=2)
         gate_event(worker, society, direction=Direction.ENTRY, when=first)
         gate_event(worker, society, direction=Direction.ENTRY)

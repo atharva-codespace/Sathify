@@ -1,0 +1,59 @@
+{% load static %}<!doctype html>
+<html lang="en" >
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280">
+  <title>Sathify Ops</title>
+  {# Desktop only, deliberately. The PRD splits the platform by surface: the
+     console is a web application and the resident/worker apps are mobile. A
+     responsive console would invite operators to reconcile payments on a phone,
+     which is the workflow this product most wants to discourage. #}
+  <link rel="stylesheet" href="{% static 'console/console.css' %}">
+</head>
+<body>
+  <noscript>
+    <div class="noscript">The console needs JavaScript. It reads the same
+      <code>/api/v1/console/</code> endpoints the mobile apps use.</div>
+  </noscript>
+
+  <div id="app" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-name">SATHIFY OPS</div>
+        <div class="brand-sub">platform admin</div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot">
+        <div id="who"></div>
+        <button id="signout" class="link-btn" type="button">Sign out</button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <input id="search" type="search" placeholder="Search receipt no. · UTR · name · flat" autocomplete="off">
+        <span id="scope-note" class="muted"></span>
+        <span id="level" class="chip"></span>
+      </header>
+      <section id="screen" class="screen" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <div id="login" class="login" hidden>
+    <form class="login-card" id="login-form">
+      <div class="brand-name">SATHIFY OPS</div>
+      <p class="muted">Platform operators only. Society administrators use the app.</p>
+      <label>Phone number
+        <input id="phone" name="phone" inputmode="numeric" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn primary" type="submit" id="login-btn">Sign in</button>
+      <p id="login-error" class="error" role="alert" hidden></p>
+    </form>
+  </div>
+
+  <script src="{% static 'console/console.js' %}"></script>
+</body>
+</html>

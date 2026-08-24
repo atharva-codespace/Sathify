@@ -306,3 +306,103 @@ class Resident(TimeStampedModel):
     def household(self):
         """Everyone else registered against the same flat (Module 2.4)."""
         return Resident.objects.filter(flat=self.flat).exclude(pk=self.pk)
+
+
+class VisitFeePolicy(models.TextChoices):
+    """How the per-visit fee behaves when a worker serves several flats in one trip.
+
+    She enters the society once and works four homes, so she incurs the travel
+    overhead once but earns four visit fees, and her effective rate on a dense
+    day rises above the calibrated target. ``PER_ENGAGEMENT`` keeps it that way
+    on purpose — that surplus *is* the platform's value proposition to her
+    ("we fill your day inside one building"), and it is the strongest reason she
+    has not to drift back to an off-platform cash arrangement.
+
+    The alternatives exist for societies that insist, and both have the same
+    defect: they make one resident's bill depend on whether another resident
+    booked that morning, which stops bills being predictable and is immediately
+    gameable. Neither is the default, and neither should be recommended.
+    """
+
+    PER_ENGAGEMENT = "per_engagement", _("Every visit charges the full fee")
+    FIRST_OF_DAY = "first_of_day", _("Only the day's first visit charges the fee")
+    SHARED_PRO_RATA = "shared_pro_rata", _("The day's visits share one fee")
+
+
+class SocietyBillingConfig(TimeStampedModel):
+    """Per-society knobs for the hourly billing engine.
+
+    One row per society, created on demand by :meth:`for_society` so that a
+    society which has never opened the settings screen still bills correctly —
+    a missing config is a valid, fully functional state, exactly as a missing
+    subscription is (see payments.SocietySubscription).
+
+    Nothing here is read at invoice time. Every value is copied onto the
+    ``WorkSession`` when it is priced, because a committee changing the rounding
+    rule in March must not silently rewrite what a worker was paid in January.
+    """
+
+    society = models.OneToOneField(
+        "societies.Society", on_delete=models.CASCADE, related_name="billing_config"
+    )
+
+    #: T in `F = R x T`. How much fixed overhead a visit costs a worker, in
+    #: minutes: travel each way, the gate, the lift, getting in and out.
+    #:
+    #: Society-level and never per-worker. Scaling the fee by how far each
+    #: worker travels would make the ones who live furthest out the most
+    #: expensive to hire, and in this market those are almost always the
+    #: poorest — it would quietly turn a worker's address into a hiring penalty.
+    visit_overhead_minutes = models.PositiveSmallIntegerField(
+        default=30,
+        db_default=30,
+        help_text=_("Fixed overhead per visit, used to calibrate the visit fee."),
+    )
+
+    visit_fee_policy = models.CharField(
+        max_length=20,
+        choices=VisitFeePolicy.choices,
+        default=VisitFeePolicy.PER_ENGAGEMENT,
+        db_default=VisitFeePolicy.PER_ENGAGEMENT,
+    )
+
+    #: Nearest this many minutes, half-up, applied once per session.
+    #:
+    #: Nearest rather than up: it is symmetric, so neither party can claim the
+    #: app leans against them, and it is the only mode in which a genuine
+    #: shortfall actually registers. `round_up_in_workers_favour` is the
+    #: opt-in alternative, surfaced at onboarding as a committee decision
+    #: rather than buried here as a default.
+    round_minutes = models.PositiveSmallIntegerField(default=15, db_default=15)
+    round_up_in_workers_favour = models.BooleanField(default=False, db_default=False)
+
+    #: Basis points, so 10000 is 1.0x. Overtime is plain time by default;
+    #: a society may agree a premium.
+    ot_multiplier_bp = models.PositiveIntegerField(default=10_000, db_default=10_000)
+
+    #: How long after the expected departure a still-open session is closed by
+    #: the nightly job, and how much notice cancels a visit for free.
+    autoclose_after_minutes = models.PositiveSmallIntegerField(default=90, db_default=90)
+    free_cancellation_hours = models.PositiveSmallIntegerField(default=12, db_default=12)
+
+    #: The review window both parties get before an invoice becomes payable.
+    review_window_hours = models.PositiveSmallIntegerField(default=48, db_default=48)
+
+    class Meta:
+        verbose_name = _("society billing config")
+        verbose_name_plural = _("society billing configs")
+
+    def __str__(self):
+        return f"Billing config for {self.society}"
+
+    @classmethod
+    def for_society(cls, society):
+        """The society's config, creating the default row if it has none.
+
+        Callers should always come through here rather than catching
+        ``DoesNotExist``, so that "this society never configured billing" and
+        "this society chose the defaults" are the same code path — because they
+        are the same situation.
+        """
+        config, _created = cls.objects.get_or_create(society=society)
+        return config

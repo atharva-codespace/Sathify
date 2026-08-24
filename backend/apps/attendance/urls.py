@@ -2,7 +2,7 @@
 
 from django.urls import path
 
-from . import views
+from . import sessions_api, views
 
 app_name = "attendance"
 
@@ -36,4 +36,27 @@ urlpatterns = [
 
     # --- 7.5 / 13.3 Tier 3: register digitisation ---------------------------
     path("registers/", views.RegisterScanListCreateView.as_view(), name="register-list"),
+
+    # --- 7.7 Work sessions (the household's side of the day) ----------------
+    # Literal segments first: `sessions/<uuid:pk>/` would otherwise swallow
+    # `sessions/today/` as a session id and 404 the worker's home screen.
+    path("sessions/today/", sessions_api.TodayScreenView.as_view(), name="session-today"),
+    path("sessions/start/", sessions_api.StartSessionView.as_view(), name="session-start"),
+    path("sessions/<uuid:pk>/stop/", sessions_api.StopSessionView.as_view(), name="session-stop"),
+    path(
+        "sessions/<uuid:pk>/request-overtime/",
+        sessions_api.RequestOvertimeView.as_view(),
+        name="session-request-ot",
+    ),
+    path(
+        "sessions/<uuid:pk>/approve-overtime/",
+        sessions_api.ApproveOvertimeView.as_view(),
+        name="session-approve-ot",
+    ),
+    path(
+        "sessions/<uuid:pk>/confirm/",
+        sessions_api.ConfirmSessionView.as_view(),
+        name="session-confirm",
+    ),
+    path("sessions/", sessions_api.MySessionsView.as_view(), name="session-list"),
 ]

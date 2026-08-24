@@ -269,6 +269,35 @@ class ApiEndpoints {
   /// 7.5 — photographed paper register, the last-resort path.
   static const String registerScans = '/attendance/registers/';
 
+  // --- 7.7 Work sessions -----------------------------------------------------
+  //
+  // A session is per (engagement, day) — one flat's work, not one trip through
+  // the gate. See `work_session_models.dart` for why that distinction is the
+  // whole reason these endpoints exist.
+
+  /// The worker's whole Today screen in one payload.
+  static const String sessionsToday = '/attendance/sessions/today/';
+
+  /// List sessions the caller is a party to. `?date=`, `?from=`/`?to=`.
+  static const String sessions = '/attendance/sessions/';
+
+  static const String sessionStart = '/attendance/sessions/start/';
+
+  static String sessionStop(String sessionId) =>
+      '/attendance/sessions/$sessionId/stop/';
+
+  /// She asks. Nothing is billed until the resident answers.
+  static String sessionRequestOvertime(String sessionId) =>
+      '/attendance/sessions/$sessionId/request-overtime/';
+
+  /// The resident answers. This is what makes extra time payable.
+  static String sessionApproveOvertime(String sessionId) =>
+      '/attendance/sessions/$sessionId/approve-overtime/';
+
+  /// Her yes/no on a session the nightly job closed for her.
+  static String sessionConfirm(String sessionId) =>
+      '/attendance/sessions/$sessionId/confirm/';
+
   /// 7.3 — submit a live gate photo for comparison.
   static String verifyFace(String eventId) =>
       '/attendance/events/$eventId/face/';
@@ -297,6 +326,20 @@ class ApiEndpoints {
 
   /// 8.6 — raised disputes.
   static const String paymentDisputes = '/payments/disputes/';
+
+  // --- 8.10 Invoices (hourly engagements) ------------------------------------
+
+  static const String invoices = '/payments/invoices/';
+
+  static String invoice(int invoiceId) => '/payments/invoices/$invoiceId/';
+
+  /// Query one line. Holds that amount; the rest of the bill still pays.
+  static String invoiceQuery(int invoiceId) =>
+      '/payments/invoices/$invoiceId/query/';
+
+  /// The other party accepting, in one tap.
+  static String acceptQuery(int queryId) =>
+      '/payments/invoices/queries/$queryId/accept/';
 
   static String payment(String paymentId) => '/payments/$paymentId/';
 

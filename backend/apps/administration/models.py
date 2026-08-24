@@ -34,6 +34,7 @@ by recruiting.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
 from django.db import models
@@ -497,6 +498,302 @@ class ResidentDirectory(Resident):
         verbose_name_plural = _("resident directory")
 
 
+
+# ===========================================================================
+# Module 11.5 — Cross-society report jobs
+#
+# WHY THIS IS A JOB TABLE AND NOT A TASK QUEUE
+#
+# `docs/free-tier-constraints.md` §7 is explicit: there is no Celery, no Redis
+# and no scheduler on this project's plan, and it warns that adding one anyway
+# is *worse* than not having it — "tasks would be accepted into a queue nothing
+# drains, the client would poll a 'processing' state forever, and no error would
+# ever explain why."
+#
+# So this follows the pattern that document settles on instead: an idempotent,
+# bounded sweep with three triggers — a read that naturally passes it, an
+# endpoint the external uptime pinger can call, and a management command. The
+# rows below are the sweep's work list, not a broker's inbox. Every state
+# transition is safe to attempt twice, because "whoever happens to load the
+# screen" is an acceptable trigger only if that is true.
+#
+# ONE SOCIETY MUST NOT VOID THE OTHER HUNDRED AND TWENTY-SEVEN
+#
+# A cross-society build touches every society in scope, and at that fan-out
+# something will always fail — a society with a decade of gate events, a
+# transient database timeout. A single status column would make the whole job
+# fail for one bad tenant, which in practice means an operator who never gets a
+# report at all. Hence ReportJobSociety: per-tenant state, so a job can finish
+# *partially*, say which societies did not make it, and retry only those.
+# ===========================================================================
+
+
+class ReportKind(models.TextChoices):
+    """The builders in ``reports.py`` this can drive.
+
+    Deliberately the same set the single-society endpoint offers. A cross-
+    society report that could show something the society's own report cannot
+    would be a second source of truth, and the two would eventually disagree.
+    """
+
+    ATTENDANCE = "attendance", _("Attendance")
+    PAYMENTS = "payments", _("Payments")
+    COMPLAINTS = "complaints", _("Complaints")
+
+
+class ReportScope(models.TextChoices):
+    ALL = "all", _("Every society")
+    TIER = "tier", _("Every society on a subscription tier")
+    SELECTED = "selected", _("A chosen list of societies")
+
+
+class ReportFormat(models.TextChoices):
+    CSV = "csv", _("CSV")
+    PDF = "pdf", _("PDF")
+
+
+class ReportJobStatus(models.TextChoices):
+    PENDING = "pending", _("Queued, waiting for a sweep")
+    RUNNING = "running", _("Being built")
+    READY = "ready", _("Finished")
+    #: Finished, but at least one society could not be built. The file exists
+    #: and contains everything that *did* build — see the class docstring.
+    PARTIAL = "partial", _("Finished with some societies missing")
+    FAILED = "failed", _("Could not be built")
+
+
+class ReportJobQuerySet(models.QuerySet):
+    def claimable(self):
+        """Jobs a sweep may pick up.
+
+        Includes RUNNING rows whose lease has lapsed. A process that dies
+        mid-build would otherwise leave a job RUNNING forever with nobody
+        allowed to touch it, which is precisely the "processing state nobody
+        can explain" failure the free-tier doc warns about.
+        """
+        stale = timezone.now() - dt.timedelta(minutes=ReportJob.LEASE_MINUTES)
+        return self.filter(
+            models.Q(status=ReportJobStatus.PENDING)
+            | models.Q(status=ReportJobStatus.RUNNING, started_at__lt=stale)
+        )
+
+    def live(self):
+        return self.exclude(status=ReportJobStatus.FAILED)
+
+
+class ReportJob(models.Model):
+    """One cross-society report an operator asked for.
+
+    Not ``SocietyScopedModel``: this is the one model in the codebase that is
+    deliberately *about* several societies at once. Its tenancy rule lives in
+    :meth:`societies_in_scope` instead, and is asserted by tests rather than by
+    a foreign key.
+    """
+
+    #: How long a claimed job may stay RUNNING before another sweep may take it.
+    #: Generous — a 128-society build is slow — but finite, which is the point.
+    LEASE_MINUTES = 15
+
+    #: Attempts per society before that society is given up on. Small: a build
+    #: that failed twice for the same tenant is not going to succeed on the
+    #: ninth try, and an operator waiting on a report deserves to be told.
+    MAX_ATTEMPTS = 3
+
+    #: Signed downloads are pointless if they live forever — a full export is
+    #: the largest privacy surface the console has (§9.4d).
+    RETENTION_DAYS = 7
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    requested_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="report_jobs",
+    )
+
+    kind = models.CharField(max_length=20, choices=ReportKind.choices)
+    scope = models.CharField(
+        max_length=20, choices=ReportScope.choices, default=ReportScope.ALL
+    )
+    #: Meaningful only when scope is TIER.
+    tier = models.CharField(max_length=20, blank=True, db_default="")
+    #: Meaningful only when scope is SELECTED.
+    societies = models.ManyToManyField(
+        "societies.Society", blank=True, related_name="report_jobs"
+    )
+
+    period_start = models.DateField()
+    period_end = models.DateField()
+    formats = models.JSONField(default=list)
+
+    #: Off by default and reason-gated at the API. A cross-society export with
+    #: names and phone numbers in it is the single largest privacy surface in
+    #: the product, so including them is an explicit act with a stated purpose.
+    include_pii = models.BooleanField(default=False, db_default=False)
+    reason = models.CharField(max_length=300, blank=True, db_default="")
+
+    status = models.CharField(
+        max_length=20,
+        choices=ReportJobStatus.choices,
+        default=ReportJobStatus.PENDING,
+        db_default=ReportJobStatus.PENDING,
+        db_index=True,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0, db_default=0)
+    last_error = models.CharField(max_length=300, blank=True, db_default="")
+
+    csv_file = models.FileField(upload_to="reports/%Y/%m/", blank=True)
+    pdf_file = models.FileField(upload_to="reports/%Y/%m/", blank=True)
+    row_count = models.PositiveIntegerField(default=0, db_default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    objects = ReportJobQuerySet.as_manager()
+
+    class Meta:
+        verbose_name = _("report job")
+        verbose_name_plural = _("report jobs")
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} {self.period_label} ({self.status})"
+
+    @property
+    def period_label(self) -> str:
+        return f"{self.period_start:%d %b %Y} - {self.period_end:%d %b %Y}"
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status in {
+            ReportJobStatus.READY,
+            ReportJobStatus.PARTIAL,
+            ReportJobStatus.FAILED,
+        }
+
+    @property
+    def is_downloadable(self) -> bool:
+        """Ready or partial, and not yet expired.
+
+        Partial counts: a report missing three societies out of a hundred and
+        twenty-eight is still the answer to most questions somebody asked it.
+        """
+        if self.status not in {ReportJobStatus.READY, ReportJobStatus.PARTIAL}:
+            return False
+        return self.expires_at is None or self.expires_at > timezone.now()
+
+    @property
+    def progress(self) -> dict:
+        rows = list(self.society_jobs.all())
+        done = sum(1 for row in rows if row.status == ReportJobStatus.READY)
+        failed = sum(1 for row in rows if row.status == ReportJobStatus.FAILED)
+        return {
+            "total": len(rows),
+            "done": done,
+            "failed": failed,
+            "percent": round(100 * done / len(rows)) if rows else 0,
+        }
+
+    def societies_in_scope(self):
+        """Exactly the societies this job may read, and no others.
+
+        The whole tenancy rule for cross-society reporting is this one method.
+        Everything downstream builds from what it returns, so a scoping mistake
+        cannot leak through a builder — and a test that asserts on this asserts
+        on the real boundary rather than on a filter copied into a view.
+        """
+        from apps.payments.models import SubscriptionTier
+        from apps.societies.models import Society
+
+        if self.scope == ReportScope.SELECTED:
+            return self.societies.all()
+
+        queryset = Society.objects.all()
+        if self.scope == ReportScope.TIER:
+            if self.tier == SubscriptionTier.FREE:
+                # A society with no subscription row *is* free — the absence is
+                # a valid state, so it must not be filtered out here.
+                return queryset.filter(
+                    models.Q(subscription__isnull=True)
+                    | models.Q(subscription__tier=SubscriptionTier.FREE)
+                )
+            return queryset.filter(subscription__tier=self.tier)
+        return queryset
+
+
+class ReportJobSociety(models.Model):
+    """One society's slice of a job. The unit of retry.
+
+    Society-scoped by hand rather than through ``SocietyScopedModel``, because
+    the parent is not scoped and inheriting the mixin here would imply a tenancy
+    guarantee the pair does not have.
+    """
+
+    job = models.ForeignKey(
+        ReportJob, on_delete=models.CASCADE, related_name="society_jobs"
+    )
+    society = models.ForeignKey(
+        "societies.Society", on_delete=models.CASCADE, related_name="report_job_slices"
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=ReportJobStatus.choices,
+        default=ReportJobStatus.PENDING,
+        db_default=ReportJobStatus.PENDING,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0, db_default=0)
+    row_count = models.PositiveIntegerField(default=0, db_default=0)
+    last_error = models.CharField(max_length=300, blank=True, db_default="")
+
+    #: The built rows, cached so a retry of one society does not rebuild the
+    #: other hundred and twenty-seven.
+    payload = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("report job society")
+        verbose_name_plural = _("report job societies")
+        ordering = ["society__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job", "society"], name="one_slice_per_society_per_job"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.society} in {self.job_id} ({self.status})"
+
+    @property
+    def has_auto_attempts_left(self) -> bool:
+        """Whether the *sweep* may pick this up again on its own.
+
+        Bounded on purpose: a build that failed three times for the same tenant
+        is not going to succeed on the ninth, and an operator waiting on a
+        report deserves to be told rather than watched to spin.
+        """
+        return self.attempts < ReportJob.MAX_ATTEMPTS
+
+    @property
+    def can_retry(self) -> bool:
+        """Whether an *operator* may retry it. Any failed slice qualifies.
+
+        Deliberately not gated on :attr:`has_auto_attempts_left`. The two are
+        different judgements: the sweep gives up because it has no way to know
+        whether anything changed, while a person pressing Retry has usually just
+        fixed the thing that broke. Tying the button to the automatic budget
+        would disable it at exactly the moment it becomes useful — which is the
+        only moment anybody presses it.
+        """
+        return self.status == ReportJobStatus.FAILED
+
+
 __all__ = [
     "CLOSED_STATUSES",
     "ESCALATED_ON_ARRIVAL",
@@ -507,6 +804,12 @@ __all__ = [
     "ComplaintStatus",
     "ComplaintUpdate",
     "DemandKind",
+    "ReportFormat",
+    "ReportJob",
+    "ReportJobSociety",
+    "ReportJobStatus",
+    "ReportKind",
+    "ReportScope",
     "ResidentDirectory",
     "UnmetDemand",
     "WorkerDirectory",

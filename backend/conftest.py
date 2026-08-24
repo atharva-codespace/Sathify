@@ -143,3 +143,51 @@ def authenticated_client(api_client):
         return client
 
     return _authenticate
+
+
+@pytest.fixture
+def midday_clock(monkeypatch):
+    """Pin the clock to 10:00 local, today, for the duration of one test.
+
+    Several suites build fixtures at an offset from "now" — twenty minutes
+    ahead, ninety minutes behind — and an offset that crosses midnight does not
+    fail honestly. It quietly tests a *different scenario*: a visit becomes
+    tomorrow's, a surcharge moves to the day-ahead tier, or a booking meant to be
+    ninety minutes stale gets clamped to a few minutes stale and stays inside a
+    grace window it was written to have escaped.
+
+    `_soon_but_still_today` in the bookings suite already guards the date half of
+    this. It cannot guard the other half: at 00:48 there is no "ninety minutes
+    ago" that is still today, so clamping is the only option left and clamping
+    changes the premise.
+
+    Pinning the *time of day* fixes it at the source while leaving the date
+    alone, which matters — fixtures elsewhere legitimately build around the
+    current month. Ten in the morning is far from both boundaries, so no
+    reasonable offset in either direction can reach one.
+
+    Not applied globally on purpose: a suite where every test sees a frozen clock
+    is one where a genuine now-dependent bug can hide. This is opt-in, per test,
+    where the offset arithmetic actually needs it.
+    """
+    import datetime as _dt
+
+    from django.utils import timezone as _tz
+
+    real_localtime = _tz.localtime
+    frozen_local = real_localtime().replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    frozen_utc = frozen_local.astimezone(_dt.timezone.utc)
+
+    def fake_localtime(value=None, *args, **kwargs):
+        # Only "what time is it now?" is answered from the freeze. Converting a
+        # given datetime must keep working, or every call that formats a stored
+        # timestamp would start returning ten in the morning.
+        if value is None:
+            return frozen_local
+        return real_localtime(value, *args, **kwargs)
+
+    monkeypatch.setattr(_tz, "now", lambda: frozen_utc)
+    monkeypatch.setattr(_tz, "localtime", fake_localtime)
+    return frozen_local

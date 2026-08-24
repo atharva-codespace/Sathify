@@ -33,6 +33,15 @@ class PaymentsScreen extends ConsumerWidget {
               tooltip: 'Monthly statement',
               icon: const Icon(Icons.receipt_long),
               onPressed: () => context.push(Routes.earnings),
+            )
+          else
+            // Module 8.10. An hourly engagement bills once a month over many
+            // visits, so its invoices cannot be rows in this per-payment
+            // ledger — they get their own list, reached from the same screen.
+            IconButton(
+              tooltip: 'My bills',
+              icon: const Icon(Icons.receipt_long_outlined),
+              onPressed: () => context.push(Routes.myBills),
             ),
         ],
       ),

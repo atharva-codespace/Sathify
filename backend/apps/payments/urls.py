@@ -2,7 +2,7 @@
 
 from django.urls import path
 
-from . import views
+from . import invoices_api, views
 
 app_name = "payments"
 
@@ -49,6 +49,18 @@ urlpatterns = [
     ),
 
     # --- 8.2 Ledger ----------------------------------------------------------
+    # --- 8.10 Invoices (hourly engagements) ---------------------------------
+    # Before the catch-all `<uuid:pk>/` routes below, which would otherwise
+    # match "invoices" as a payment id.
+    path("invoices/", invoices_api.MyInvoicesView.as_view(), name="invoice-list"),
+    path("invoices/<int:pk>/", invoices_api.InvoiceDetailView.as_view(), name="invoice-detail"),
+    path("invoices/<int:pk>/query/", invoices_api.RaiseQueryView.as_view(), name="invoice-query"),
+    path(
+        "invoices/queries/<int:pk>/accept/",
+        invoices_api.AcceptQueryView.as_view(),
+        name="query-accept",
+    ),
+
     path("", views.PaymentListView.as_view(), name="payment-list"),
     path("<uuid:pk>/", views.PaymentDetailView.as_view(), name="payment-detail"),
     path("<uuid:pk>/receipt/", views.ReceiptView.as_view(), name="receipt"),
