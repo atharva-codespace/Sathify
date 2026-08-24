@@ -25,7 +25,13 @@ import '../../features/attendance/presentation/screens/gate_scanner_screen.dart'
 import '../../features/attendance/presentation/screens/my_gate_pass_screen.dart';
 import '../../features/attendance/presentation/screens/self_checkin_screen.dart';
 import '../../features/auth/presentation/screens/register_screen.dart';
+import '../../features/attendance/presentation/screens/helper_attendance_screen.dart';
+import '../../features/attendance/presentation/screens/my_day_screen.dart';
+import '../../features/attendance/presentation/screens/my_work_screen.dart';
+import '../../features/attendance/presentation/screens/session_detail_screen.dart';
 import '../../features/payments/presentation/screens/earnings_screen.dart';
+import '../../features/payments/presentation/screens/invoice_screen.dart';
+import '../../features/payments/presentation/screens/my_bills_screen.dart';
 import '../../features/payments/presentation/screens/payments_screen.dart';
 import '../../features/payments/presentation/screens/receipt_screen.dart';
 import '../../features/ratings/presentation/screens/rate_job_screen.dart';
@@ -154,6 +160,32 @@ class Routes {
   /// Module 13.3 tier 2 — the worker records their own arrival when there is
   /// no guard at the gate.
   static const String selfCheckIn = '/my-pass/check-in';
+
+  /// Module 7.7 — the worker's day, one card per flat.
+  ///
+  /// Distinct from [selfCheckIn], which records one arrival at the *gate*. This
+  /// is per engagement: she works four homes on one trip through that gate, and
+  /// each home owes its own hours.
+  static const String myDay = '/my-day';
+
+  /// Module 7.7 — the resident's view of their helper's attendance.
+  static const String helperAttendance = '/helper/attendance';
+  static const String sessionDetail = '/helper/attendance/:sessionId';
+
+  static String sessionDetailPath(String sessionId) =>
+      '/helper/attendance/$sessionId';
+
+  /// Module 7.7 — her month, broken down by home.
+  static const String myWork = '/my-day/month';
+
+  /// Module 8.10 — the monthly bill for an hourly engagement.
+  ///
+  /// The list is declared before the detail route so "/bills" is never matched
+  /// as an invoice id.
+  static const String myBills = '/bills';
+  static const String invoice = '/bills/:invoiceId';
+
+  static String invoicePath(int invoiceId) => '/bills/$invoiceId';
 
   /// Module 8 — the ledger, a receipt, and a worker's monthly statement.
   static const String payments = '/payments';
@@ -592,6 +624,40 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: Routes.selfCheckIn,
             builder: (_, __) => const SelfCheckInScreen(),
+          ),
+
+          // Module 7.7 — her day, a flat at a time. Registered after the gate
+          // routes because it is a different question: the gate asks "is she in
+          // the society?", this asks "whose hours are these?".
+          GoRoute(path: Routes.myDay, builder: (_, __) => const MyDayScreen()),
+
+          // The resident's side of the same record. The literal path is
+          // declared before the `:sessionId` one so "attendance" is never
+          // matched as a session id.
+          GoRoute(
+            path: Routes.helperAttendance,
+            builder: (_, __) => const HelperAttendanceScreen(),
+          ),
+          GoRoute(
+            path: Routes.sessionDetail,
+            builder: (_, goState) => SessionDetailScreen(
+              sessionId: goState.pathParameters['sessionId']!,
+            ),
+          ),
+
+          GoRoute(path: Routes.myWork, builder: (_, __) => const MyWorkScreen()),
+
+          // Module 8.10 — the bills those sessions add up to. The list first,
+          // so `/bills` cannot be read as an invoice id.
+          GoRoute(
+            path: Routes.myBills,
+            builder: (_, __) => const MyBillsScreen(),
+          ),
+          GoRoute(
+            path: Routes.invoice,
+            builder: (_, goState) => InvoiceScreen(
+              invoiceId: int.parse(goState.pathParameters['invoiceId']!),
+            ),
           ),
 
           // A guard's home is the scanner. There is nothing else they do at a

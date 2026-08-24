@@ -73,6 +73,7 @@ LOCAL_APPS = [
     "apps.notifications",  # Module 10 — Notifications (FCM)
     "apps.administration", # Module 11 — Admin, Reporting & Complaints
     "apps.ai_services",    # Module 12 — AI Layer (4-tier provider fallback)
+    "apps.console",        # Module 14 — Platform Operations (Superadmin console)
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS

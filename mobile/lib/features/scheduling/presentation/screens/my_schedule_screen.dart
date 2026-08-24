@@ -90,6 +90,29 @@ class _MyScheduleScreenState extends ConsumerState<MyScheduleScreen>
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
+              // Module 7.7. Sits beside the schedule because it answers the
+              // question the schedule raises: the tabs above say who is due,
+              // these say who actually came and for how long. Per engagement
+              // rather than per gate pass — one trip through the gate can
+              // cover four homes, and each owes its own hours.
+              if (isWorker)
+                const PopupMenuItem(
+                  value: Routes.myDay,
+                  child: ListTile(
+                    leading: Icon(Icons.today_outlined),
+                    title: Text('My day'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                )
+              else
+                const PopupMenuItem(
+                  value: Routes.helperAttendance,
+                  child: ListTile(
+                    leading: Icon(Icons.how_to_reg_outlined),
+                    title: Text('Helper visits'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
               PopupMenuItem(
                 value: isWorker ? Routes.earnings : Routes.payments,
                 child: ListTile(

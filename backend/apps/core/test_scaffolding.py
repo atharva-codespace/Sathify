@@ -14,8 +14,11 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.urls import reverse
+from rest_framework.exceptions import NotAuthenticated, ValidationError
+from rest_framework_simplejwt.exceptions import InvalidToken
 
 from apps.accounts.models import Role
+from apps.core.exceptions import sathify_exception_handler
 
 User = get_user_model()
 
@@ -171,3 +174,52 @@ class TestHealthAndSchema:
         """A broken schema breaks the Flutter client contract, so assert it builds."""
         response = authenticated_client(admin_user).get(reverse("schema"))
         assert response.status_code == 200
+
+
+class TestErrorEnvelope:
+    """The single error shape every Flutter screen parses.
+
+    Exercised through the handler directly rather than over HTTP: the mapping
+    from a DRF exception to the envelope is the whole contract, and keeping
+    these dependency-free means they stay cheap.
+    """
+
+    @staticmethod
+    def _envelope(exc):
+        response = sathify_exception_handler(exc, {"request": None, "view": None})
+        assert response is not None, "handler declined an exception DRF owns"
+        return response.data["error"]
+
+    def test_a_single_error_keeps_its_own_message(self):
+        error = self._envelope(NotAuthenticated())
+        assert error["code"] == "authentication_failed"
+        assert error["message"] != "One or more fields failed validation."
+
+    def test_field_errors_are_reported_as_validation(self):
+        error = self._envelope(
+            ValidationError({"phone_number": ["This field is required."]})
+        )
+        assert error["code"] == "validation_error"
+        assert error["message"] == "One or more fields failed validation."
+        assert error["details"] == {"phone_number": ["This field is required."]}
+
+    def test_token_errors_are_not_mislabelled_as_field_validation(self):
+        """SimpleJWT ships a machine-readable code beside its detail.
+
+        That makes the dict two keys wide, so discriminating on len() == 1 sent
+        the user of every expired session a "fields failed validation" message
+        about a dead token. Regression test for that.
+        """
+        error = self._envelope(
+            InvalidToken({"detail": "Token is invalid", "code": "token_not_valid"})
+        )
+        assert error["message"] == "Token is invalid"
+        assert error["details"]["code"] == "token_not_valid"
+
+    def test_a_serialiser_field_named_detail_is_still_validation(self):
+        """The type of "detail" decides, so a field of that name is not special."""
+        error = self._envelope(
+            ValidationError({"detail": ["This field is required."]})
+        )
+        assert error["message"] == "One or more fields failed validation."
+        assert error["details"] == {"detail": ["This field is required."]}
