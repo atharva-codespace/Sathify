@@ -165,3 +165,72 @@ IsGateStaff = (IsGuard | IsSocietyAdmin) & IsApproved
 
 #: Either party to an engagement — used by ratings and attendance history.
 IsEngagementParty = (IsResident | IsWorker) & IsApproved
+
+
+# ---------------------------------------------------------------------------
+# Platform operations
+#
+# These sit apart from the four society roles on purpose. Everything above
+# answers "may this user act inside their society?"; everything below answers
+# "may this user act across all of them?", which is a different question with a
+# different blast radius and deserves to read differently at the call site.
+# ---------------------------------------------------------------------------
+
+
+class IsSuperadmin(_RolePermission):
+    required_role = Role.SUPERADMIN
+    message = "Only platform operators can access this resource."
+
+
+class _SuperadminCapability(BasePermission):
+    """Base for the two capabilities that move money without a signature.
+
+    Reads through ``User.superadmin_level`` rather than the profile directly, so
+    an operator with no profile row is denied rather than raising. Absence of a
+    grant is a denial, which is the only safe direction for a check like this.
+    """
+
+    capability: str = ""
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated and user.is_superadmin):
+            return False
+        profile = getattr(user, "superadmin_profile", None)
+        return bool(profile and getattr(profile, self.capability, False))
+
+
+class CanRefund(_SuperadminCapability):
+    capability = "may_refund"
+    message = "Refunds require a Finance operator."
+
+
+class CanSettleManually(_SuperadminCapability):
+    capability = "may_settle_manually"
+    message = "Confirming a settlement by hand requires a Finance operator."
+
+
+class CanImpersonate(BasePermission):
+    """Support operators only.
+
+    Finance deliberately cannot impersonate. The two capabilities are separated
+    so that no single compromised console account can both alter a society's
+    operational records and move money out of them.
+    """
+
+    message = "Impersonation requires a Support operator."
+
+    def has_permission(self, request, view):
+        from .models import SuperadminLevel
+
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and user.is_superadmin
+            and user.superadmin_level == SuperadminLevel.SUPPORT
+        )
+
+
+#: Read access to the console. Every console endpoint starts here.
+IsPlatformOperator = IsSuperadmin & IsApproved

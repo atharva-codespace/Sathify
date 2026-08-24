@@ -61,6 +61,7 @@ api_v1 = [
     path("notifications/", include("apps.notifications.urls")),     # Module 10
     path("admin-tools/", include("apps.administration.urls")),      # Module 11
     path("ai/", include("apps.ai_services.urls")),                  # Module 12
+    path("console/", include("apps.console.urls")),                 # Module 14
 ]
 
 urlpatterns += [path("api/v1/", include((api_v1, "api"), namespace="v1"))]

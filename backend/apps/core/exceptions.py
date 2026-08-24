@@ -48,9 +48,23 @@ def sathify_exception_handler(exc, context):
 
     # DRF returns either {"detail": "..."} for single errors or a dict of
     # field -> [messages] for validation failures. Normalise both.
-    if isinstance(detail, dict) and "detail" in detail and len(detail) == 1:
+    #
+    # The discriminator is the *type* of "detail", not the size of the dict. An
+    # APIException renders its detail as a string; a validation failure renders
+    # every entry as a list. Keying on len() == 1 instead broke SimpleJWT, which
+    # ships a machine-readable code beside its detail:
+    #
+    #     {"detail": "Token is invalid", "code": "token_not_valid"}
+    #
+    # Two keys, so every expired session reached the Flutter client mislabelled
+    # "One or more fields failed validation." A serialiser that happens to own a
+    # field named "detail" still lands in the validation branch below, because
+    # its value is a list rather than a string.
+    if isinstance(detail, dict) and isinstance(detail.get("detail"), str):
         message = str(detail["detail"])
-        details = {}
+        # Whatever travelled alongside "detail" describes that same single
+        # error, so surface it instead of dropping it on the floor.
+        details = {key: value for key, value in detail.items() if key != "detail"}
     elif isinstance(detail, dict):
         message = "One or more fields failed validation."
         details = detail

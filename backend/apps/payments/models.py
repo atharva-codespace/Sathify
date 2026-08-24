@@ -32,6 +32,7 @@ from lying about it.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
 from django.db import models
@@ -815,3 +816,471 @@ class PaymentDispute(SocietyScopedModel, TimeStampedModel):
             update_fields=["status", "resolution", "resolved_by", "resolved_at", "updated_at"]
         )
         return True
+
+
+# ===========================================================================
+# Module 8.10 — Invoices for hourly engagements
+#
+# An Invoice WRAPS a Payment; it does not replace one. On issue it creates
+# exactly one Payment of kind ENGAGEMENT_SALARY, which inherits the whole
+# existing settlement apparatus — receipt number, due date, the Razorpay order,
+# `settled_via`, the webhook path. Everything above this line keeps working
+# unchanged, and nothing downstream of a Payment learns that hourly exists.
+#
+# What the Invoice adds is the part a monthly rate never needed: a per-session
+# breakdown a resident can audit line by line, and a review window in which
+# either party can query a line before any money moves.
+# ===========================================================================
+
+
+class InvoiceStatus(models.TextChoices):
+    #: Accruing sessions as the period runs. Visible live to both parties, so
+    #: the month-end figure is never a surprise and never a negotiation.
+    DRAFT = "draft", _("Building through the period")
+    #: The window in which either party may query a line. Nothing is payable.
+    REVIEW = "review", _("Open for questions")
+    #: Lines frozen, a Payment exists and is owed.
+    ISSUED = "issued", _("Issued and payable")
+    SETTLED = "settled", _("Paid")
+    VOID = "void", _("Cancelled before issue")
+
+
+class InvoiceLineKind(models.TextChoices):
+    TIME = "time", _("Time worked")
+    OVERTIME = "overtime", _("Approved extra time")
+    VISIT_FEE = "visit_fee", _("Visit fee")
+    #: A correction to an ALREADY ISSUED invoice, carried onto the next one.
+    #: Never an edit of history — see `Invoice.add_adjustment`.
+    ADJUSTMENT = "adjustment", _("Adjustment from an earlier period")
+
+
+class InvoiceQuerySet(models.QuerySet):
+    def in_review(self):
+        return self.filter(status=InvoiceStatus.REVIEW)
+
+    def payable(self):
+        return self.filter(status=InvoiceStatus.ISSUED)
+
+    def for_period(self, start, end):
+        return self.filter(period_start__gte=start, period_end__lte=end)
+
+
+class Invoice(SocietyScopedModel, TimeStampedModel):
+    """One engagement's bill for one billing period.
+
+    Amounts are recomputed from the lines by :meth:`recalculate` rather than
+    being maintained incrementally, so a line added, removed or held can never
+    leave a total that disagrees with the rows beneath it. That disagreement is
+    the single failure a resident would notice fastest and trust least.
+    """
+
+    engagement = models.ForeignKey(
+        "hiring.Engagement", on_delete=models.PROTECT, related_name="invoices"
+    )
+    resident = models.ForeignKey(
+        "societies.Resident", on_delete=models.PROTECT, related_name="invoices"
+    )
+    worker = models.ForeignKey(
+        "workers.WorkerProfile", on_delete=models.PROTECT, related_name="invoices"
+    )
+
+    number = models.CharField(max_length=32, unique=True, db_index=True)
+    period_start = models.DateField()
+    period_end = models.DateField()
+
+    status = models.CharField(
+        max_length=20,
+        choices=InvoiceStatus.choices,
+        default=InvoiceStatus.DRAFT,
+        db_default=InvoiceStatus.DRAFT,
+        db_index=True,
+    )
+
+    review_closes_at = models.DateTimeField(null=True, blank=True)
+    issued_at = models.DateTimeField(null=True, blank=True)
+    settled_at = models.DateTimeField(null=True, blank=True)
+
+    #: Created on issue, for the payable amount only. Null while in DRAFT or
+    #: REVIEW, and null for the held portion — a held line has no Payment until
+    #: it is resolved onto a later invoice.
+    payment = models.OneToOneField(
+        Payment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="invoice",
+    )
+
+    # --- Frozen totals, all derived from the lines -------------------------
+    time_paise = models.PositiveIntegerField(default=0, db_default=0)
+    overtime_paise = models.PositiveIntegerField(default=0, db_default=0)
+    visit_fee_paise = models.PositiveIntegerField(default=0, db_default=0)
+    adjustment_paise = models.IntegerField(default=0, db_default=0)
+    #: The disputed portion, withheld from this invoice's Payment. This is the
+    #: number that makes §9.4a's ladder safe to use: a query over one session
+    #: must never freeze a month's wages, so only the contested lines wait.
+    held_paise = models.PositiveIntegerField(default=0, db_default=0)
+
+    objects = InvoiceQuerySet.as_manager()
+
+    class Meta:
+        verbose_name = _("invoice")
+        verbose_name_plural = _("invoices")
+        ordering = ["-period_end", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["engagement", "period_start", "period_end"],
+                name="one_invoice_per_engagement_period",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["society", "-period_end"]),
+            models.Index(fields=["status", "-period_end"]),
+        ]
+
+    def __str__(self):
+        return f"{self.number} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        if not self.number:
+            self.number = self._generate_number()
+        super().save(*args, **kwargs)
+
+    def _generate_number(self) -> str:
+        return f"INV-{self.engagement_id}-{self.period_end:%y%m}"
+
+    # -- totals --------------------------------------------------------------
+
+    @property
+    def subtotal_paise(self) -> int:
+        return self.time_paise + self.overtime_paise + self.visit_fee_paise
+
+    @property
+    def total_paise(self) -> int:
+        """Everything the resident owes for this period, held lines included."""
+        return max(0, self.subtotal_paise + self.adjustment_paise)
+
+    @property
+    def payable_paise(self) -> int:
+        """What is actually charged now — the total less anything under query."""
+        return max(0, self.total_paise - self.held_paise)
+
+    def recalculate(self, *, commit: bool = True) -> "Invoice":
+        """Rebuild every total from the lines. The only way totals are set."""
+        totals = {kind: 0 for kind, _label in InvoiceLineKind.choices}
+        held = 0
+        for line in self.lines.all():
+            totals[line.kind] = totals.get(line.kind, 0) + line.amount_paise
+            if line.is_held:
+                held += line.amount_paise
+
+        self.time_paise = totals.get(InvoiceLineKind.TIME, 0)
+        self.overtime_paise = totals.get(InvoiceLineKind.OVERTIME, 0)
+        self.visit_fee_paise = totals.get(InvoiceLineKind.VISIT_FEE, 0)
+        self.adjustment_paise = totals.get(InvoiceLineKind.ADJUSTMENT, 0)
+        self.held_paise = held
+
+        if commit:
+            self.save(
+                update_fields=[
+                    "time_paise", "overtime_paise", "visit_fee_paise",
+                    "adjustment_paise", "held_paise", "updated_at",
+                ]
+            )
+        return self
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def add_session(self, session) -> "InvoiceLine | None":
+        """Add a priced session's lines. Returns the time line, or None.
+
+        Skips silently when the session is already on this invoice, so the
+        nightly accrual can be re-run without duplicating a day.
+        """
+        if self.lines.filter(session=session).exists():
+            return None
+
+        made = None
+        if session.time_paise:
+            made = InvoiceLine.objects.create(
+                invoice=self, session=session, kind=InvoiceLineKind.TIME,
+                minutes=session.billable_minutes, amount_paise=session.time_paise,
+                description=f"{session.visit_date:%d %b} — time worked",
+            )
+        if session.overtime_paise:
+            InvoiceLine.objects.create(
+                invoice=self, session=session, kind=InvoiceLineKind.OVERTIME,
+                minutes=session.overtime_minutes, amount_paise=session.overtime_paise,
+                description=f"{session.visit_date:%d %b} — approved extra time",
+            )
+        if session.visit_fee_paise:
+            InvoiceLine.objects.create(
+                invoice=self, session=session, kind=InvoiceLineKind.VISIT_FEE,
+                minutes=0, amount_paise=session.visit_fee_paise,
+                description=f"{session.visit_date:%d %b} — visit fee",
+            )
+        self.recalculate()
+        return made
+
+    def add_adjustment(self, *, amount_paise: int, description: str, query=None) -> "InvoiceLine":
+        """Carry a correction from an earlier, already-issued period onto this one.
+
+        This is how a resolved query reaches the money. An issued invoice is
+        never edited — ``AttendanceEvent`` sets the rule this follows, that a
+        wrong entry is corrected by a superseding one — so a resident who
+        queries a three-month-old charge is shown the number that actually
+        happened, plus the adjustment that answered it.
+        """
+        line = InvoiceLine.objects.create(
+            invoice=self,
+            kind=InvoiceLineKind.ADJUSTMENT,
+            minutes=0,
+            amount_paise=amount_paise,
+            description=description[:200],
+            query=query,
+        )
+        self.recalculate()
+        return line
+
+    def open_review(self, *, hours: int = 48) -> bool:
+        """Close accrual and start the window. Idempotent."""
+        if self.status != InvoiceStatus.DRAFT:
+            return False
+        self.status = InvoiceStatus.REVIEW
+        self.review_closes_at = timezone.now() + dt.timedelta(hours=hours)
+        self.save(update_fields=["status", "review_closes_at", "updated_at"])
+        return True
+
+    def issue(self, *, due_at=None) -> Payment | None:
+        """Freeze the lines and raise a Payment for the payable amount.
+
+        Returns the Payment, or None when everything on the invoice is held or
+        the total is zero — a bill for nothing should not exist, and a bill
+        entirely under query has nothing to charge yet.
+        """
+        if self.status not in {InvoiceStatus.DRAFT, InvoiceStatus.REVIEW}:
+            return None
+
+        self.recalculate()
+        payable = self.payable_paise
+
+        payment = None
+        if payable > 0:
+            payment = Payment.objects.create(
+                society=self.society,
+                resident=self.resident,
+                worker=self.worker,
+                engagement=self.engagement,
+                kind=PaymentKind.ENGAGEMENT_SALARY,
+                amount_paise=payable,
+                period_start=self.period_start,
+                period_end=self.period_end,
+                due_at=due_at,
+                note=f"Invoice {self.number}",
+            )
+
+        self.payment = payment
+        self.status = InvoiceStatus.ISSUED
+        self.issued_at = timezone.now()
+        self.save(update_fields=["payment", "status", "issued_at", "updated_at"])
+        return payment
+
+    def mark_settled(self) -> bool:
+        if self.status != InvoiceStatus.ISSUED:
+            return False
+        self.status = InvoiceStatus.SETTLED
+        self.settled_at = timezone.now()
+        self.save(update_fields=["status", "settled_at", "updated_at"])
+        return True
+
+
+class InvoiceLine(TimeStampedModel):
+    """One charge on an invoice, traceable to the session that produced it."""
+
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name="lines")
+    session = models.ForeignKey(
+        "attendance.WorkSession",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="invoice_lines",
+        help_text=_("Null on an adjustment carried from an earlier period."),
+    )
+    query = models.ForeignKey(
+        "payments.SessionQuery",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="adjustment_lines",
+        help_text=_("The query this adjustment answers, when it answers one."),
+    )
+
+    kind = models.CharField(max_length=20, choices=InvoiceLineKind.choices)
+    description = models.CharField(max_length=200)
+    minutes = models.PositiveIntegerField(default=0, db_default=0)
+    #: Signed, because an adjustment may be a credit. Every other kind is
+    #: positive, and `Invoice.total_paise` floors the result at zero.
+    amount_paise = models.IntegerField()
+
+    #: Withheld from this invoice's Payment while a query is open against it.
+    is_held = models.BooleanField(default=False, db_default=False)
+
+    class Meta:
+        verbose_name = _("invoice line")
+        verbose_name_plural = _("invoice lines")
+        ordering = ["invoice", "id"]
+        indexes = [models.Index(fields=["invoice", "kind"])]
+
+    def __str__(self):
+        return f"{self.description} — {format_paise(self.amount_paise)}"
+
+
+class QueryStage(models.TextChoices):
+    """Where a queried session has reached on the §9.4a ladder.
+
+    Three stages, and the platform decides none of them. Most queries die at
+    EVIDENCE, where both parties are simply shown the same record and one of
+    them recognises their own mistake.
+    """
+
+    EVIDENCE = "evidence", _("Both parties shown the record")
+    BILATERAL = "bilateral", _("Waiting for one side to accept the other")
+    ADMIN = "admin", _("With the society administrator")
+    RESOLVED = "resolved", _("Settled")
+    WITHDRAWN = "withdrawn", _("Withdrawn by whoever raised it")
+
+
+class SessionQuery(SocietyScopedModel, TimeStampedModel):
+    """A question about one work session, raised during the review window.
+
+    Distinct from :class:`PaymentDispute`, which is about money that has already
+    been charged. This is earlier and cheaper: it is raised against a *line* on
+    a draft invoice, before a Payment exists, which is why it can be answered by
+    one party tapping "yes, you're right" with nothing to refund.
+    """
+
+    session = models.ForeignKey(
+        "attendance.WorkSession", on_delete=models.CASCADE, related_name="queries"
+    )
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.CASCADE, related_name="queries", null=True, blank=True
+    )
+    raised_by = models.ForeignKey(
+        "accounts.User", on_delete=models.PROTECT, related_name="raised_session_queries"
+    )
+
+    reason = models.CharField(max_length=30, choices=DisputeReason.choices)
+    description = models.TextField(max_length=1000, blank=True)
+
+    stage = models.CharField(
+        max_length=20,
+        choices=QueryStage.choices,
+        default=QueryStage.EVIDENCE,
+        db_default=QueryStage.EVIDENCE,
+        db_index=True,
+    )
+    escalates_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=_("When this reaches the society administrator if unresolved."),
+    )
+
+    resolution = models.TextField(max_length=1000, blank=True)
+    resolved_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="resolved_session_queries",
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    #: Signed. Positive credits the resident, negative charges them.
+    adjustment_paise = models.IntegerField(default=0, db_default=0)
+
+    class Meta:
+        verbose_name = _("session query")
+        verbose_name_plural = _("session queries")
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "raised_by"],
+                condition=models.Q(
+                    stage__in=[QueryStage.EVIDENCE, QueryStage.BILATERAL, QueryStage.ADMIN]
+                ),
+                name="one_open_query_per_session_per_person",
+            ),
+        ]
+        indexes = [models.Index(fields=["society", "stage", "-created_at"])]
+
+    def __str__(self):
+        return f"Query on {self.session_id} ({self.stage})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.stage in {QueryStage.EVIDENCE, QueryStage.BILATERAL, QueryStage.ADMIN}
+
+    def resolve(self, *, resolution: str, by=None, adjustment_paise: int = 0) -> bool:
+        """Settle the query. Idempotent.
+
+        Releasing the hold is the caller's job (``services.resolve_query``),
+        because it also has to decide which invoice carries the adjustment.
+        """
+        if not self.is_open:
+            return False
+        self.stage = QueryStage.RESOLVED
+        self.resolution = resolution[:1000]
+        self.resolved_by = by
+        self.resolved_at = timezone.now()
+        self.adjustment_paise = adjustment_paise
+        self.save(
+            update_fields=[
+                "stage", "resolution", "resolved_by", "resolved_at",
+                "adjustment_paise", "updated_at",
+            ]
+        )
+        return True
+
+
+class WageFloor(TimeStampedModel):
+    """The statutory minimum hourly wage for domestic work, by state.
+
+    Checked against the *effective* rate rather than the advertised one, which
+    is the reason §7.2's calibration earns its keep twice: because `F = R × T`
+    makes the effective rate equal R at every job length, one comparison answers
+    compliance for every engagement in the state. Under a bare hourly rate, a
+    short visit could sit below the floor on an effective basis while the stored
+    number looked perfectly compliant.
+    """
+
+    state = models.CharField(max_length=100, db_index=True)
+    min_hourly_paise = models.PositiveIntegerField(
+        help_text=_("Statutory minimum per hour, in paise.")
+    )
+    effective_from = models.DateField(db_index=True)
+    source_note = models.CharField(
+        max_length=300, blank=True,
+        help_text=_("Which notification or order this figure came from."),
+    )
+
+    class Meta:
+        verbose_name = _("wage floor")
+        verbose_name_plural = _("wage floors")
+        ordering = ["state", "-effective_from"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["state", "effective_from"], name="one_wage_floor_per_state_per_date"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.state}: {format_paise(self.min_hourly_paise)}/hr from {self.effective_from}"
+
+    @classmethod
+    def in_force(cls, state: str, *, on=None):
+        """The floor applying in ``state`` on a date, or None if none is recorded.
+
+        None means "we have no figure", not "there is no floor" — the caller
+        must not read a missing row as permission.
+        """
+        on = on or timezone.localdate()
+        return (
+            cls.objects.filter(state__iexact=state, effective_from__lte=on)
+            .order_by("-effective_from")
+            .first()
+        )

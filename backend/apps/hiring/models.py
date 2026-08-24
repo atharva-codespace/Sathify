@@ -100,6 +100,19 @@ def default_response_deadline():
     return timezone.now() + dt.timedelta(hours=hours)
 
 
+class RateBasis(models.TextChoices):
+    """How pay is agreed. Two bases, and no silent migration between them.
+
+    ``MONTHLY`` is what every engagement created before this field existed uses,
+    and remains the default. ``HOURLY`` is opt-in per engagement and requires
+    both parties to agree in-app, because it changes what a resident owes when a
+    worker is late and that is not a change to spring on either of them.
+    """
+
+    MONTHLY = "monthly", _("A fixed monthly rate")
+    HOURLY = "hourly", _("A visit fee plus an hourly rate")
+
+
 class RecurringTerms(models.Model):
     """The terms of a recurring arrangement: which days, what time, what pay.
 
@@ -107,6 +120,24 @@ class RecurringTerms(models.Model):
     in one abstract base so the two cannot drift apart — an engagement is
     supposed to be a faithful record of the request that produced it, and that
     guarantee is worth more than the small indirection.
+
+    ---------------------------------------------------------------------------
+    WHY HOURLY PAY NEEDS *TWO* NUMBERS
+    ---------------------------------------------------------------------------
+    ``hourly_rate`` alone underpays short visits, and does it invisibly. A
+    worker's cost of turning up — travel, the gate queue, the lift, the slot she
+    has committed — is fixed, so an hour-long job at ₹120/hr pays her ₹120 for
+    perhaps ninety minutes of her day (₹80/hr effective), while a four-hour job
+    at the same advertised rate pays ₹107/hr effective. She cannot see the
+    mechanism but she feels the result, and rationally starts dropping the short
+    jobs first. The resident then experiences a *pricing* failure as
+    unreliability, and blames her for it.
+
+    ``visit_fee`` is the fix, and it is calibrated rather than guessed. With
+    ``F = R × T`` (see ``payments.hourly.calibrated_visit_fee``) her effective
+    rate is exactly constant across every job length — the algebra is in that
+    module. Both numbers are whole rupees, matching the convention that a
+    resident and a worker agree amounts out loud.
     """
 
     days_of_week = models.JSONField(
@@ -121,8 +152,46 @@ class RecurringTerms(models.Model):
     )
     monthly_rate = models.PositiveIntegerField(help_text=_("Agreed monthly pay in INR."))
 
+    # --- Hourly terms -------------------------------------------------------
+    # `db_default` on all three is not decoration. payments/models.py records an
+    # outage caused by adding columns to this database without one: the schema
+    # is shared between a developer's machine and the deployed instance, so a
+    # migration applied from one lands under the other while it is still
+    # serving, and any process running code that predates the field omits it
+    # from its INSERT. Every payment insert failed, which meant every emergency
+    # request failed. These columns do not repeat that.
+    rate_basis = models.CharField(
+        max_length=10,
+        choices=RateBasis.choices,
+        default=RateBasis.MONTHLY,
+        db_default=RateBasis.MONTHLY,
+        help_text=_("Monthly unless both parties opted into hourly."),
+    )
+    hourly_rate = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+        help_text=_("Agreed hourly pay in INR. Zero on monthly terms."),
+    )
+    visit_fee = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+        help_text=_(
+            "Flat fee per visit in INR, covering travel and the committed slot. "
+            "Zero on monthly terms."
+        ),
+    )
+
     class Meta:
         abstract = True
+
+    @property
+    def is_hourly(self) -> bool:
+        return self.rate_basis == RateBasis.HOURLY
+
+    @property
+    def scheduled_minutes(self) -> int:
+        """Minutes one visit is expected to take, under either basis."""
+        return int(self.expected_duration_minutes)
 
     @property
     def day_labels(self) -> list[str]:
@@ -142,6 +211,15 @@ class RecurringTerms(models.Model):
     def occurs_on(self, day: dt.date) -> bool:
         """Whether these terms call for a visit on ``day``."""
         return weekday_of(day) in set(self.days_of_week)
+
+    def scheduled_minutes_on(self, day: dt.date) -> int:
+        """Minutes these terms call for on one day. Zero when nothing is due.
+
+        Used by the hourly day-rate derivation so that leave settlement and the
+        replacement split can ask "what was this day worth?" without either of
+        them learning which basis the engagement is on.
+        """
+        return self.scheduled_minutes if self.occurs_on(day) else 0
 
 
 def _log_unmet_demand(lapsed_requests) -> None:
